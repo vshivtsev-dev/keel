@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Проверить синтаксис всех скриптов
+        run: |
+          for f in bin/keel install.sh lib/*.sh modules/*/*.sh tests/*.sh; do
+            bash -n "$f"
+          done
+
+      - name: Тесты
+        run: ./tests/run.sh
+
+      - name: Манифест-пример читается и проходит валидацию
+        run: ./bin/keel validate --plain --manifest manifest/host.example.json
