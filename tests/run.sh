@@ -18,7 +18,10 @@ PASSED=0; FAILED=0; FAILED_NAMES=()
 
 # --- Мелкие помощники --------------------------------------------------------
 
-fail() { printf 'ОШИБКА: %s\n' "$*" >&2; return 1; }
+# Каждый тест выполняется в своей подоболочке, поэтому exit гасит
+# именно его. Раньше здесь был return, и упавшая проверка не мешала
+# тесту досчитаться до конца и отчитаться об успехе.
+fail() { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
 
 assert_eq() {
   [[ "$1" == "$2" ]] || fail "ожидалось «$2», получено «$1» ${3:+($3)}"
@@ -49,6 +52,8 @@ load_keel() {
   source "${KEEL_ROOT}/lib/state.sh"
   # shellcheck source=../lib/pve.sh
   source "${KEEL_ROOT}/lib/pve.sh"
+  # shellcheck source=../lib/guests.sh
+  source "${KEEL_ROOT}/lib/guests.sh"
   # shellcheck source=../lib/modules.sh
   source "${KEEL_ROOT}/lib/modules.sh"
   core_init
@@ -200,6 +205,27 @@ test_config_missing_file_is_not_an_error() {
   local rc=0; config_load "${T}/нет-такого.json" || rc=$?
   assert_rc 0 "$rc" "отсутствие манифеста не должно ронять keel"
   assert_eq "${#KEEL_CFG[@]}" "0" "конфиг должен остаться пустым"
+}
+
+test_config_fallback_parser() {
+  # Путь на случай хоста, где relaxed повёл себя не так, как обещает
+  # документация: комментарии срезаются нашим разбором.
+  export KEEL_JSON_RELAXED="no"
+  cat >"${T}/m.json" <<'EOF'
+{
+  # решётка
+  "host": { "repos": "no-subscription" },   // две косые
+  "storages": [
+    { "name": "запятая, и скобка }" },
+    { "name": "https://example.com/#anchor" },
+  ],
+}
+EOF
+  config_load "${T}/m.json"
+  assert_eq "$(config_get host.repos)" "no-subscription" "комментарии обоих видов"
+  assert_eq "$(config_get storages.0.name)" "запятая, и скобка }" "строка со спецсимволами цела"
+  assert_eq "$(config_get storages.1.name)" "https://example.com/#anchor" "ссылка не обрезана"
+  assert_eq "$(config_len storages)" "2" "висячие запятые убраны"
 }
 
 # --- Ядро --------------------------------------------------------------------
@@ -522,6 +548,215 @@ test_backup_ignores_foreign_jobs() {
   assert_not_ran "pvesh set"
 }
 
+
+# --- Фаза 2: гости -----------------------------------------------------------
+
+# Хост, на котором уже всё готово для создания гостей
+_fake_guest_host() {
+  export KEEL_FS_ROOT="${T}/root"
+  mkdir -p "${KEEL_FS_ROOT}/etc/pve/qemu-server" "${KEEL_FS_ROOT}/etc/pve/lxc" \
+           "${KEEL_FS_ROOT}/dev/dri" "${T}/vz/snippets"
+  cat >"${KEEL_FS_ROOT}/etc/pve/storage.cfg" <<EOF
+dir: local
+	path ${T}/vz
+	content iso,vztmpl,backup,snippets
+
+lvmthin: local-lvm
+	thinpool data
+	vgname pve
+	content rootdir,images
+EOF
+  : >"${KEEL_FS_ROOT}/dev/dri/renderD128"
+  : >"${KEEL_FS_ROOT}/dev/dri/card0"
+  stub_commands qm pct pveam curl xz
+  stub_says "pct.help" <<'EOF'
+  --dev[n] [path=]<Path>
+EOF
+  stub_says "pveam.available" <<'EOF'
+system          ubuntu-24.04-standard_24.04-2_amd64.tar.zst
+EOF
+}
+
+# Положить готовый образ в кэш, чтобы не изображать скачивание
+_seed_image_cache() {
+  mkdir -p "${KEEL_STATE_DIR}/images"
+  : >"${KEEL_STATE_DIR}/images/$1"
+}
+
+test_guests_profile_resolution() {
+  cat >"${T}/m.json" <<'EOF'
+{ "guests": [
+  { "id": 100, "name": "a", "profile": "desktop", "graphics": "dri" },
+  { "id": 101, "name": "b", "profile": "desktop", "graphics": "virgl" },
+  { "id": 102, "name": "c", "profile": "haos" }
+] }
+EOF
+  config_load "${T}/m.json"
+  assert_eq "$(guest_profile_name 0)" "desktop-lxc" "dri — это контейнер"
+  assert_eq "$(guest_profile_name 1)" "desktop-vm"  "virgl — это ВМ"
+  assert_eq "$(guest_profile_name 2)" "haos"        "обычный профиль как есть"
+}
+
+test_guests_disk_units() {
+  assert_eq "$(disk_to_gb 64G)" "64"
+  assert_eq "$(disk_to_gb 32)" "32"
+  assert_eq "$(disk_to_gb 65536M)" "64"
+}
+
+test_guests_all_profiles_are_valid() {
+  local name kind
+  while IFS= read -r name; do
+    profile_load "$name" || fail "профиль ${name} не читается"
+    kind=$(prof_get kind "")
+    case "$kind" in
+      vm-image|vm-cloudinit|lxc) ;;
+      *) fail "профиль ${name}: непонятный kind «${kind}»" ;;
+    esac
+    [[ -n "$(prof_get title "")" ]] || fail "профиль ${name}: нет title"
+  done < <(profile_list)
+}
+
+test_guests_existing_is_never_touched() {
+  _fake_guest_host
+  printf '{ "guests": [ { "id": 100, "name": "haos", "profile": "haos" } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  printf 'cores: 2\nmemory: 4096\n' >"${KEEL_FS_ROOT}/etc/pve/qemu-server/100.conf"
+
+  assert_eq "$(mod_rc guests/50-guests check)" "0" "существующий гость — работы нет"
+  assert_contains "$(mod_out guests/50-guests check)" "не трогаю"
+
+  export KEEL_MODE="yes"
+  mod_rc guests/50-guests apply >/dev/null
+  assert_not_ran "qm create"
+  assert_not_ran "qm destroy"
+}
+
+test_guests_reports_drift_without_fixing() {
+  _fake_guest_host
+  printf '{ "guests": [ { "id": 100, "name": "haos", "profile": "haos", "memory": 8192 } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  printf 'cores: 2\nmemory: 4096\n' >"${KEEL_FS_ROOT}/etc/pve/qemu-server/100.conf"
+
+  assert_contains "$(mod_out guests/50-guests check)" "память: на хосте 4096, в манифесте 8192"
+  export KEEL_MODE="yes"
+  mod_rc guests/50-guests apply >/dev/null
+  assert_not_ran "qm set 100 --memory"
+}
+
+test_guests_haos_vm_commands() {
+  _fake_guest_host
+  _seed_image_cache "haos_ova-14.2.qcow2"
+  printf '{ "guests": [ { "id": 100, "name": "haos", "profile": "haos", "storage": "local-lvm", "disk": "32G", "start_on_boot": true } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+
+  assert_eq "$(mod_rc guests/50-guests check)" "10" "гостя нет — надо создавать"
+  export KEEL_MODE="yes"
+  mod_rc guests/50-guests apply >/dev/null
+
+  assert_ran "qm create 100 --name haos"
+  assert_ran "--machine q35"
+  assert_ran "--bios ovmf"
+  assert_ran "--efidisk0 local-lvm:0,efitype=4m,pre-enrolled-keys=0"
+  assert_ran "import-from=${KEEL_STATE_DIR}/images/haos_ova-14.2.qcow2"
+  assert_ran "qm set 100 --boot order=scsi0"
+  assert_ran "qm resize 100 scsi0 32G"
+  assert_ran "--onboot 1"
+}
+
+test_guests_cloudinit_vm_commands() {
+  _fake_guest_host
+  _seed_image_cache "noble-server-cloudimg-amd64.img"
+  cat >"${T}/m.json" <<'EOF'
+{ "guests": [ {
+  "id": 101, "name": "desktop", "profile": "desktop", "graphics": "virgl",
+  "storage": "local-lvm", "disk": "64G",
+  "cloudinit": { "user": "alex", "ipconfig": "ip=dhcp" },
+  "packages": ["obs-studio"]
+} ] }
+EOF
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+  mod_rc guests/50-guests apply >/dev/null
+
+  assert_ran "qm create 101 --name desktop"
+  assert_ran "--vga virtio-gl"
+  assert_ran "--audio0 device=ich9-intel-hda,driver=spice"
+  assert_ran "qm set 101 --ide2 local-lvm:cloudinit"
+  assert_ran "qm set 101 --cicustom user=local:snippets/keel-101-user.yml"
+  assert_ran "qm set 101 --ipconfig0 ip=dhcp"
+
+  local snippet="${T}/vz/snippets/keel-101-user.yml"
+  [[ -f "$snippet" ]] || fail "сниппет cloud-init не записан"
+  assert_contains "$(cat "$snippet")" "#cloud-config"
+  assert_contains "$(cat "$snippet")" "name: alex"
+  assert_contains "$(cat "$snippet")" "- vlc"          # из профиля
+  assert_contains "$(cat "$snippet")" "- obs-studio"   # из манифеста
+  assert_contains "$(cat "$snippet")" "systemctl set-default graphical.target"
+}
+
+test_guests_cloudinit_needs_snippets_storage() {
+  _fake_guest_host
+  _seed_image_cache "noble-server-cloudimg-amd64.img"
+  # Хранилище без snippets — создавать ВМ нельзя, и это должно быть сказано прямо
+  cat >"${KEEL_FS_ROOT}/etc/pve/storage.cfg" <<EOF
+dir: local
+	path ${T}/vz
+	content iso,vztmpl,backup
+EOF
+  printf '{ "guests": [ { "id": 101, "name": "d", "profile": "desktop", "graphics": "virgl" } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+  local out; out=$(mod_out guests/50-guests apply)
+  assert_contains "$out" "сниппеты"
+  assert_not_ran "qm create"
+}
+
+test_guests_lxc_desktop_commands() {
+  _fake_guest_host
+  cat >"${T}/m.json" <<'EOF'
+{ "guests": [ {
+  "id": 102, "name": "desktop", "profile": "desktop", "graphics": "dri",
+  "storage": "local-lvm", "disk": "64G", "cores": 4, "memory": 8192,
+  "cloudinit": { "user": "alex" }
+} ] }
+EOF
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+  mod_rc guests/50-guests apply >/dev/null
+
+  assert_ran "pveam download local ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+  assert_ran "pct create 102 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+  assert_ran "--rootfs local-lvm:64"
+  assert_ran "--unprivileged 1"
+  assert_ran "--features nesting=1"
+  assert_ran "renderD128,gid=993"
+  assert_ran "card0,gid=44"
+  assert_ran "pct start 102"
+  assert_ran "pct exec 102 -- bash /root/keel-post-install.sh"
+}
+
+test_guests_lxc_password_never_in_log() {
+  _fake_guest_host
+  printf '{ "guests": [ { "id": 102, "name": "d", "profile": "desktop", "graphics": "dri", "cloudinit": { "user": "alex" } } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+  local out; out=$(mod_out guests/50-guests apply)
+
+  local secret_file="${KEEL_STATE_DIR}/secrets/102.txt"
+  [[ -f "$secret_file" ]] || fail "пароль не сохранён в ${secret_file}"
+  local pw; pw=$(cat "$secret_file")
+  [[ -n "$pw" ]] || fail "пароль пустой"
+  assert_eq "$(stat -c %a "$secret_file")" "600" "файл с паролем должен быть доступен только root"
+
+  if printf '%s' "$out" | grep -qF -- "$pw"; then
+    fail "пароль попал на экран"
+  fi
+  if grep -rqF -- "$pw" "$KEEL_LOG_DIR" 2>/dev/null; then
+    fail "пароль попал в лог"
+  fi
+  assert_contains "$out" "********"
+}
+
 # --- Запуск ------------------------------------------------------------------
 
 printf '\nМанифест\n'
@@ -532,6 +767,7 @@ it "config: вложенность, массивы, булевы"       test_con
 it "config: ловит неизвестный раздел"           test_config_validate_catches_typos
 it "config: требует id и profile у гостя"       test_config_validate_requires_guest_fields
 it "config: нет файла — не ошибка"              test_config_missing_file_is_not_an_error
+it "config: запасной разбор без relaxed"        test_config_fallback_parser
 
 printf '\nЯдро\n'
 it "core: экранирование команд"                 test_core_cmd_str_quotes
@@ -562,6 +798,18 @@ it "backup: создаёт задание"                    test_backup_create
 it "backup: обновляет своё задание"             test_backup_updates_existing_job
 it "backup: совпадающее не трогает"             test_backup_matching_job_is_left_alone
 it "backup: не присваивает чужие задания"       test_backup_ignores_foreign_jobs
+
+printf '\nФаза 2: гости\n'
+it "guests: профиль по роли и графике"          test_guests_profile_resolution
+it "guests: единицы размера диска"              test_guests_disk_units
+it "guests: все профили валидны"                test_guests_all_profiles_are_valid
+it "guests: существующего не трогает"           test_guests_existing_is_never_touched
+it "guests: сообщает о расхождениях, не правит" test_guests_reports_drift_without_fixing
+it "guests: команды создания HAOS"              test_guests_haos_vm_commands
+it "guests: команды создания ВМ с cloud-init"   test_guests_cloudinit_vm_commands
+it "guests: без snippets честно отказывается"   test_guests_cloudinit_needs_snippets_storage
+it "guests: команды создания LXC с /dev/dri"    test_guests_lxc_desktop_commands
+it "guests: пароль не утекает в лог и на экран" test_guests_lxc_password_never_in_log
 
 printf '\nСтатические проверки\n'
 if ./tests/lint-run-guard.sh >/dev/null 2>&1; then

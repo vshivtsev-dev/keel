@@ -129,3 +129,18 @@ ${body}"
     esac
   fi
 }
+
+# Запрос пароля. В текстовом режиме ввод не отображается.
+# Пустой ответ — вызывающая сторона решает, что делать.
+ui_password() {
+  local title=$1 text=$2
+  if ui_has_whiptail; then
+    whiptail --title "$title" --passwordbox "$text" 12 70 3>&1 1>&2 2>&3 || true
+  else
+    local reply
+    printf '\n--- %s ---\n%s\n' "$title" "$text" >&2
+    read -r -s -p "Пароль (пусто — сгенерировать): " reply </dev/tty
+    printf '\n' >&2
+    printf '%s' "$reply"
+  fi
+}

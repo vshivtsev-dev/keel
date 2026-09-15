@@ -32,6 +32,8 @@ source "${KEEL_ROOT}/lib/config.sh"
 source "${KEEL_ROOT}/lib/state.sh"
 # shellcheck source=../lib/pve.sh
 source "${KEEL_ROOT}/lib/pve.sh"
+# shellcheck source=../lib/guests.sh
+source "${KEEL_ROOT}/lib/guests.sh"
 # shellcheck source=../lib/modules.sh
 source "${KEEL_ROOT}/lib/modules.sh"
 # shellcheck source=../lib/doctor.sh

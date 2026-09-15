@@ -77,21 +77,40 @@ config_relaxed_supported() {
   [[ "$KEEL_JSON_RELAXED" == "yes" ]]
 }
 
-# Запасной путь: срезать # -комментарии, не тронув то, что внутри строк
-# (иначе развалятся значения вроде "https://example.com/#anchor").
+# Запасной путь на случай, если relaxed на этом хосте недоступен:
+# срезать комментарии (# и //) и висячие запятые, не тронув содержимое строк.
+# Наивный sed тут не годится — он сломает значения вроде "https://..." и
+# "ключ, а вот скобка }".
 _config_strip_comments() {
-  perl -pe '
-    chomp;
-    my $out = ""; my $in_str = 0; my $esc = 0;
-    for my $c (split //, $_) {
-      if ($esc)            { $out .= $c; $esc = 0; next; }
-      if ($c eq "\\")      { $out .= $c; $esc = 1; next; }
-      if ($c eq q{"})      { $in_str = !$in_str; $out .= $c; next; }
-      if ($c eq "#" && !$in_str) { last; }
-      $out .= $c;
-    }
-    $_ = $out . "\n";
-  '
+  perl -0777 -e '
+my $t = do { local $/; <STDIN> };
+my @c = split //, $t;
+my $out = ""; my $in_str = 0; my $esc = 0; my $comma = -1;
+for (my $i = 0; $i <= $#c; $i++) {
+  my $ch = $c[$i];
+  if ($in_str) {
+    $out .= $ch;
+    if    ($esc)          { $esc = 0 }
+    elsif ($ch eq "\\")   { $esc = 1 }
+    elsif ($ch eq q{"})   { $in_str = 0 }
+    next;
+  }
+  if ($ch eq q{"}) { $in_str = 1; $comma = -1; $out .= $ch; next }
+  if ($ch eq "#" || ($ch eq "/" && $i < $#c && $c[$i+1] eq "/")) {
+    $i++ while ($i <= $#c && $c[$i] ne "\n");
+    $out .= "\n";
+    next;
+  }
+  if ($ch eq ",") { $comma = length($out); $out .= $ch; next }
+  if ($ch eq "}" || $ch eq "]") {
+    substr($out, $comma, 1) = "" if $comma >= 0;
+    $comma = -1; $out .= $ch; next;
+  }
+  $comma = -1 if $ch !~ /\s/;
+  $out .= $ch;
+}
+print $out;
+'
 }
 
 # config_load [путь]

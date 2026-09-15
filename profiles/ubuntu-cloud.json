@@ -1,0 +1,24 @@
+// Ubuntu 24.04 LTS, облачный образ + cloud-init. Обычный сервер.
+{
+  "kind": "vm-cloudinit",
+  "title": "Ubuntu 24.04 (сервер)",
+
+  "image": {
+    "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
+    "compressed": "none"
+  },
+
+  "defaults": { "cores": 2, "memory": 2048, "disk": "20G" },
+
+  "vm": {
+    "machine": "q35",
+    "bios": "seabios",
+    "scsihw": "virtio-scsi-single",
+    "ostype": "l26",
+    "agent": true,
+    "cpu": "host",
+    "serial": true
+  },
+
+  "packages": ["qemu-guest-agent"]
+}

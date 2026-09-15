@@ -112,9 +112,10 @@ iommu_group_members() {
 
 # Узлы прямого доступа к видеокарте — нужны для LXC с общим iGPU
 dri_nodes() {
-  compgen -G "/dev/dri/*" >/dev/null 2>&1 || return 0
+  local dir; dir=$(fsroot /dev/dri)
+  compgen -G "${dir}/*" >/dev/null 2>&1 || return 0
   local n
-  for n in /dev/dri/*; do printf '%s\n' "$n"; done
+  for n in "${dir}"/*; do printf '%s\n' "$n"; done
 }
 
 # Библиотеки, без которых не заработает 3D-ускорение в ВМ (virtio-gl)
@@ -136,7 +137,8 @@ pve_storages() {
 # Существует ли гость с таким ID (ВМ или контейнер) — понадобится в Фазе 2
 guest_exists() {
   local id=$1
-  [[ -f "/etc/pve/qemu-server/${id}.conf" || -f "/etc/pve/lxc/${id}.conf" ]]
+  [[ -f "$(fsroot "/etc/pve/qemu-server/${id}.conf")" \
+     || -f "$(fsroot "/etc/pve/lxc/${id}.conf")" ]]
 }
 
 # --- Пакеты ------------------------------------------------------------------
