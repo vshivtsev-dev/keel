@@ -23,7 +23,11 @@ modules_find() {
   while IFS= read -r f; do
     [[ -z "$filter" || "$(module_id "$f")" == "$filter" ]] || continue
     printf '%s\n' "$f"
-  done < <(find "${KEEL_ROOT}/modules" -type f -name '*.sh' ! -name '_*' 2>/dev/null | sort)
+    # Порядок задаёт числовой префикс имени файла, а не каталог:
+    # гости должны создаваться после хранилищ, в каком бы каталоге
+    # эти модули ни лежали.
+  done < <(find "${KEEL_ROOT}/modules" -type f -name '*.sh' ! -name '_*' \
+             -printf '%f\t%p\n' 2>/dev/null | sort | cut -f2-)
 }
 
 module_id() {

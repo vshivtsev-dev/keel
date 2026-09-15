@@ -38,6 +38,8 @@ source "${KEEL_ROOT}/lib/guests.sh"
 source "${KEEL_ROOT}/lib/modules.sh"
 # shellcheck source=../lib/doctor.sh
 source "${KEEL_ROOT}/lib/doctor.sh"
+# shellcheck source=../lib/external.sh
+source "${KEEL_ROOT}/lib/external.sh"
 
 KEEL_MANIFEST="${KEEL_MANIFEST:-${KEEL_ROOT}/manifest/host.json}"
 KEEL_ONLY=""
@@ -56,6 +58,9 @@ keel — сборка и восстановление хоста Proxmox VE.
   verify      проверить, соответствует ли хост манифесту
   doctor      отчёт о состоянии хоста и о видеокарте
   validate    проверить манифест на ошибки
+  backup      снять копию конфигурации хоста прямо сейчас
+  password ID показать пароль, сгенерированный для гостя
+  external    внешние инструменты (community-scripts)
   modules     список модулей
   logs        показать последний лог
   version     версия
@@ -91,6 +96,7 @@ parse_args() {
     shift || true
   done
   KEEL_CMD=${positional[0]:-menu}
+  KEEL_ARGV=("${positional[@]}")
 }
 
 # Применять что-либо к машине, которая не является хостом Proxmox, почти
@@ -100,6 +106,15 @@ need_pve() {
   [[ "${KEEL_ALLOW_NON_PVE:-}" == "1" ]] && return 0
   pve_is_host && return 0
   die "Это не хост Proxmox VE. Если уверен — KEEL_ALLOW_NON_PVE=1 keel apply"
+}
+
+# Пароли гостей в манифесте не хранятся — только здесь, и только для root
+show_password() {
+  local id=$1
+  local file="${KEEL_STATE_DIR}/secrets/${id}.txt"
+  [[ -n "$id" ]] || die "Укажи id гостя: keel password 102"
+  [[ -f "$file" ]] || die "Для гостя ${id} пароль не сохранён (${file} нет)."
+  cat "$file"
 }
 
 show_logs() {
@@ -139,7 +154,9 @@ menu_loop() {
       pick    "3  Выбрать отдельные модули" \
       verify  "4  Проверить соответствие манифесту" \
       doctor  "5  Состояние хоста и видеокарты" \
-      logs    "6  Логи последнего запуска" \
+      backup  "6  Снять копию конфигурации хоста" \
+      extern  "7  Внешние инструменты (не часть манифеста)" \
+      logs    "8  Логи последнего запуска" \
       quit    "0  Выход")
 
     case "$choice" in
@@ -148,6 +165,8 @@ menu_loop() {
       pick)   pick_modules;                _pause ;;
       verify) modules_verify "$KEEL_ONLY"; _pause ;;
       doctor) doctor_run;                  _pause ;;
+      backup) need_root; modules_apply host/90-config-backup; _pause ;;
+      extern) need_root; external_menu;     _pause ;;
       logs)   show_logs ;;
       quit|"") return 0 ;;
     esac
@@ -176,6 +195,9 @@ main() {
     doctor)   doctor_run ;;
     validate)
       if config_validate; then ok "Манифест в порядке."; else die "В манифесте есть ошибки."; fi ;;
+    backup)   need_root; need_pve; modules_apply host/90-config-backup ;;
+    password) show_password "${KEEL_ARGV[1]:-}" ;;
+    external) need_root; external_menu ;;
     modules)  modules_list_ids | column -t -s $'\t' 2>/dev/null || modules_list_ids ;;
     logs)     if [[ -f "$KEEL_LOG_FILE" ]]; then cat "$KEEL_LOG_FILE"; fi ;;
     version)  printf 'keel %s\n' "$KEEL_VERSION" ;;

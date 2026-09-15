@@ -431,8 +431,25 @@ _lxc_post_install_script() {
 
   printf 'id -u %s >/dev/null 2>&1 || adduser --disabled-password --gecos "" %s\n' "$user" "$user"
   printf 'printf "%%s:%%s" "%s" "%s" | chpasswd\n' "$user" "$password"
-  # Группы, через которые внутри контейнера виден /dev/dri
   printf 'for g in sudo video render audio; do getent group "$g" >/dev/null && adduser %s "$g" || true; done\n' "$user"
+
+  # Права на видеокарту: вместо того чтобы угадывать gid (в Ubuntu render=993,
+  # в Debian 104, и это меняется), смотрим, какой группе устройство досталось
+  # на самом деле, и добавляем пользователя именно в неё.
+  cat <<'DRI'
+if [ -d /dev/dri ]; then
+  for dev in /dev/dri/*; do
+    [ -e "$dev" ] || continue
+    gid=$(stat -c %g "$dev")
+    grp=$(getent group "$gid" | cut -d: -f1)
+    if [ -z "$grp" ]; then
+      grp="keel-dri${gid}"
+      groupadd -g "$gid" "$grp" 2>/dev/null || true
+    fi
+    adduser KEEL_USER "$grp" 2>/dev/null || true
+  done
+fi
+DRI
 
   n=$(prof_len runcmd)
   for (( j = 0; j < n; j++ )); do printf '%s\n' "$(prof_get "runcmd.${j}")"; done
@@ -444,7 +461,8 @@ lxc_post_install() {
   local i=$1 id=$2 user=$3 password=$4
   local script preview
   script=$(mktemp); chmod 600 "$script"
-  _lxc_post_install_script "$i" "$user" "$password" >"$script"
+  _lxc_post_install_script "$i" "$user" "$password" \
+    | sed "s/KEEL_USER/${user}/g" >"$script"
 
   preview=$(sed "s/${password//\//\\/}/********/g" "$script")
   info "Внутри контейнера будет выполнено:"

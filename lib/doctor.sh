@@ -130,6 +130,13 @@ doctor_graphics() {
     _doc_warn "Вариант B (ВМ + virtio-gl)" "нет libEGL — 3D в ВМ не заработает"
   fi
 
+  local vgid rgid
+  vgid=$(host_group_gid video); rgid=$(host_group_gid render)
+  if [[ -n "$vgid" || -n "$rgid" ]]; then
+    _doc_row "Группы на хосте" "video=${vgid:-—} render=${rgid:-—}"
+    _doc_row "" "внутри контейнера номера свои; keel разберётся сам"
+  fi
+
   if (( count <= 1 )); then
     _doc_warn "Вариант C (полный проброс)" "видеокарта одна: хост останется без локального монитора"
   else

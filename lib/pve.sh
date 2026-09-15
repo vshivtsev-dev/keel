@@ -239,3 +239,70 @@ backup_jobs_json() {
   command -v pvesh >/dev/null 2>&1 || { printf '[]'; return 0; }
   pvesh get /cluster/backup --output-format json 2>/dev/null || printf '[]'
 }
+
+# --- Снимок состояния хоста для резервной копии ------------------------------
+
+# Текстовый отчёт: то, что нельзя восстановить из файлов, но очень нужно
+# знать при сборке хоста заново. Только чтение.
+host_config_report() {
+  printf '# Снимок хоста, сделан %s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+
+  printf '## Версия Proxmox\n'
+  pveversion -v 2>/dev/null || printf 'pveversion недоступен\n'
+
+  printf '\n## Диски\n'
+  lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null || true
+
+  printf '\n## Хранилища\n'
+  pvesm status 2>/dev/null || true
+
+  printf '\n## Сеть\n'
+  ip -o addr show 2>/dev/null || true
+
+  printf '\n## Виртуальные машины\n'
+  qm list 2>/dev/null || true
+
+  printf '\n## Контейнеры\n'
+  pct list 2>/dev/null || true
+
+  printf '\n## ZFS\n'
+  zpool list 2>/dev/null || printf 'ZFS не используется\n'
+
+  printf '\n## Загрузчик\n'
+  proxmox-boot-tool status 2>/dev/null || printf 'proxmox-boot-tool недоступен\n'
+}
+
+# Что именно кладём в архив. Пути относительно корня, несуществующие
+# пропускаются молча.
+host_config_paths() {
+  local p
+  for p in etc/pve \
+           etc/network/interfaces etc/network/interfaces.d \
+           etc/hosts etc/hostname etc/resolv.conf etc/fstab \
+           etc/apt/sources.list etc/apt/sources.list.d \
+           etc/default/grub etc/kernel/cmdline \
+           etc/modules etc/modprobe.d \
+           etc/vzdump.conf etc/ssh/sshd_config etc/ssh/sshd_config.d \
+           root/.ssh/authorized_keys; do
+    [[ -e "$(fsroot "/${p}")" ]] && printf '%s\n' "$p"
+  done
+  return 0
+}
+
+# Каталог с тем, чего нет в /etc: снимок состояния хоста и сам манифест.
+# Печатает путь; удалять его потом через keel_tmp_cleanup.
+host_config_staging_dir() {
+  local dir; dir=$(mktemp -d)
+  host_config_report >"${dir}/host-report.txt" 2>/dev/null || true
+  if [[ -n "${KEEL_MANIFEST:-}" && -f "$KEEL_MANIFEST" ]]; then
+    cp "$KEEL_MANIFEST" "${dir}/manifest.json"
+  fi
+  printf 'keel %s, снято %s\n' "${KEEL_VERSION:-?}" "$(date '+%Y-%m-%d %H:%M:%S')" \
+    >"${dir}/keel-version.txt"
+  printf '%s' "$dir"
+}
+
+# Числовой идентификатор группы на хосте (video, render, …)
+host_group_gid() {
+  getent group "$1" 2>/dev/null | cut -d: -f3
+}

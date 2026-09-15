@@ -159,8 +159,11 @@ run() {
   esac
 
   printf '%s→%s %s\n' "$C_BLUE" "$C_RESET" "$desc"
+  # Вывод идёт и на экран, и в лог. Скачивание образа на 500 МБ или
+  # dist-upgrade длятся минутами: молчащий экран выглядит как зависание.
   local rc=0
-  "$@" >>"$KEEL_LOG_FILE" 2>&1 || rc=$?
+  "$@" 2>&1 | tee -a "$KEEL_LOG_FILE"
+  rc=${PIPESTATUS[0]}
   if (( rc != 0 )); then
     err "Команда завершилась с кодом ${rc}: ${rendered}"
     note "Подробности в логе: ${KEEL_LOG_FILE}"
@@ -244,6 +247,14 @@ run_write() {
 KEEL_FS_ROOT="${KEEL_FS_ROOT:-}"
 
 fsroot() { printf '%s%s' "$KEEL_FS_ROOT" "$1"; }
+
+# Удаление временного каталога. Живёт в ядре, а не в модуле: там любой
+# rm справедливо считается изменением системы и требует run().
+keel_tmp_cleanup() {
+  local dir=$1
+  [[ -n "$dir" && "$dir" == /tmp/* || "$dir" == "${TMPDIR:-/tmp}"/* ]] || return 0
+  rm -rf "$dir"
+}
 
 need_root() {
   [[ "$(id -u)" -eq 0 ]] || die "Нужны права root. Запусти под root или через sudo."

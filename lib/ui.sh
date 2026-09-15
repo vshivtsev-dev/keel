@@ -144,3 +144,16 @@ ui_password() {
     printf '%s' "$reply"
   fi
 }
+
+# Однострочный ввод. Печатает введённое в stdout, пустое — отмена.
+ui_input() {
+  local title=$1 text=$2 default=${3:-}
+  if ui_has_whiptail; then
+    whiptail --title "$title" --inputbox "$text" 12 78 "$default" 3>&1 1>&2 2>&3 || true
+  else
+    local reply
+    printf '\n--- %s ---\n%s\n' "$title" "$text" >&2
+    read -r -p "> " -e -i "$default" reply </dev/tty || true
+    printf '%s' "$reply"
+  fi
+}

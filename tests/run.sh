@@ -757,6 +757,152 @@ test_guests_lxc_password_never_in_log() {
   assert_contains "$out" "********"
 }
 
+
+# --- Фаза 3: копия конфигурации хоста ----------------------------------------
+
+_fake_host_etc() {
+  export KEEL_FS_ROOT="${T}/root"
+  mkdir -p "${KEEL_FS_ROOT}/etc/pve/qemu-server" "${KEEL_FS_ROOT}/etc/network" \
+           "${KEEL_FS_ROOT}/etc/apt/sources.list.d" "${KEEL_FS_ROOT}/root/.ssh"
+  printf 'version 8\n' >"${KEEL_FS_ROOT}/etc/pve/.version"
+  printf 'cores: 2\n' >"${KEEL_FS_ROOT}/etc/pve/qemu-server/100.conf"
+  printf 'auto vmbr0\niface vmbr0 inet static\n' >"${KEEL_FS_ROOT}/etc/network/interfaces"
+  printf 'proxmox\n' >"${KEEL_FS_ROOT}/etc/hostname"
+  printf 'ssh-ed25519 AAAA test\n' >"${KEEL_FS_ROOT}/root/.ssh/authorized_keys"
+}
+
+_manifest_config_backup() {
+  cat >"${T}/m.json" <<EOF
+{ "host": { "config_backup": { "path": "${T}/copies", "keep": 3, "max_age_hours": 24 } } }
+EOF
+  config_load "${T}/m.json"
+}
+
+test_cfgbackup_zero_rule() {
+  _fake_host_etc
+  config_load "${T}/нет.json"
+  assert_eq "$(mod_rc host/90-config-backup check)" "20"
+}
+
+test_cfgbackup_creates_archive() {
+  _fake_host_etc
+  _manifest_config_backup
+  assert_eq "$(mod_rc host/90-config-backup check)" "10" "копий ещё нет"
+
+  export KEEL_MODE="yes"
+  mod_rc host/90-config-backup apply >/dev/null
+
+  local archive
+  archive=$(find "${T}/copies" -name 'keel-host-*.tar.gz' | head -n1)
+  [[ -n "$archive" ]] || fail "архив не создан"
+
+  local listing; listing=$(tar -tzf "$archive")
+  assert_contains "$listing" "etc/pve/qemu-server/100.conf"
+  assert_contains "$listing" "etc/network/interfaces"
+  assert_contains "$listing" "root/.ssh/authorized_keys"
+  assert_contains "$listing" "host-report.txt"
+  assert_contains "$listing" "manifest.json"
+}
+
+test_cfgbackup_fresh_copy_is_enough() {
+  _fake_host_etc
+  _manifest_config_backup
+  export KEEL_MODE="yes"
+  mod_rc host/90-config-backup apply >/dev/null
+  assert_eq "$(mod_rc host/90-config-backup check)" "0" "свежая копия есть — работы нет"
+  assert_eq "$(mod_rc host/90-config-backup verify)" "0"
+}
+
+test_cfgbackup_stale_copy_triggers_new_one() {
+  _fake_host_etc
+  _manifest_config_backup
+  mkdir -p "${T}/copies"
+  : >"${T}/copies/keel-host-2020-01-01_000000.tar.gz"
+  touch -d '10 days ago' "${T}/copies/keel-host-2020-01-01_000000.tar.gz"
+  assert_eq "$(mod_rc host/90-config-backup check)" "10" "старая копия — нужна новая"
+}
+
+test_cfgbackup_prunes_old_copies() {
+  _fake_host_etc
+  _manifest_config_backup
+  mkdir -p "${T}/copies"
+  local i
+  for i in 1 2 3 4 5; do
+    : >"${T}/copies/keel-host-old-${i}.tar.gz"
+    touch -d "${i} days ago" "${T}/copies/keel-host-old-${i}.tar.gz"
+  done
+  export KEEL_MODE="yes"
+  mod_rc host/90-config-backup apply >/dev/null
+
+  local left; left=$(find "${T}/copies" -name 'keel-host-*.tar.gz' | wc -l)
+  assert_eq "$left" "3" "должно остаться ровно keep копий"
+  [[ -f "${T}/copies/keel-host-old-5.tar.gz" ]] && fail "самая старая копия должна была удалиться"
+  return 0
+}
+
+
+test_guests_lxc_fixes_dri_permissions_itself() {
+  _fake_guest_host
+  printf '{ "guests": [ { "id": 102, "name": "d", "profile": "desktop", "graphics": "dri", "cloudinit": { "user": "alex" } } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  profile_load desktop-lxc
+
+  local script; script=$(_lxc_post_install_script 0 alex секрет)
+  # Номер группы внутри контейнера угадывать нельзя: в Ubuntu render=993,
+  # в Debian 104. Сценарий должен смотреть на фактического владельца.
+  assert_contains "$script" 'gid=$(stat -c %g "$dev")'
+  assert_contains "$script" "groupadd -g"
+  assert_contains "$script" "adduser KEEL_USER"
+  assert_contains "$script" "xrdp"
+}
+
+test_modules_run_in_numeric_order() {
+  # Гости создаются после хранилищ, а копия конфигурации — последней.
+  # Порядок задаёт числовой префикс имени, а не каталог, в котором
+  # модуль лежит: иначе guests/ оказывался бы раньше host/ по алфавиту.
+  local order
+  order=$(modules_list_ids | cut -f1 | paste -sd' ' -)
+  assert_eq "$order" \
+    "host/10-repos host/20-updates host/30-storage host/40-backup-jobs guests/50-guests host/90-config-backup"
+}
+
+# --- Командная строка --------------------------------------------------------
+
+_keel() { "${KEEL_ROOT}/bin/keel" --plain "$@"; }
+
+test_cli_basic_commands_work() {
+  _keel version >/dev/null || fail "keel version упал"
+  _keel help >/dev/null || fail "keel help упал"
+  _keel modules >/dev/null || fail "keel modules упал"
+  assert_contains "$(_keel modules)" "host/10-repos"
+  assert_contains "$(_keel modules)" "guests/50-guests"
+}
+
+test_cli_validates_example_manifest() {
+  _keel validate --manifest "${KEEL_ROOT}/manifest/host.example.json" >/dev/null \
+    || fail "пример манифеста не проходит проверку"
+}
+
+test_cli_rejects_unknown_command() {
+  local rc=0
+  _keel такой-команды-нет >/dev/null 2>&1 || rc=$?
+  [[ "$rc" -ne 0 ]] || fail "неизвестная команда должна завершаться ошибкой"
+}
+
+test_cli_password_says_when_there_is_none() {
+  local out rc=0
+  out=$(_keel password 999 2>&1) || rc=$?
+  [[ "$rc" -ne 0 ]] || fail "для несуществующего пароля нужен ненулевой код"
+  assert_contains "$out" "999"
+}
+
+test_cli_apply_refuses_on_non_proxmox() {
+  local out rc=0
+  out=$(_keel apply 2>&1) || rc=$?
+  [[ "$rc" -ne 0 ]] || fail "apply на не-Proxmox должен отказываться"
+  assert_contains "$out" "KEEL_ALLOW_NON_PVE"
+}
+
 # --- Запуск ------------------------------------------------------------------
 
 printf '\nМанифест\n'
@@ -810,6 +956,22 @@ it "guests: команды создания ВМ с cloud-init"   test_guests_cl
 it "guests: без snippets честно отказывается"   test_guests_cloudinit_needs_snippets_storage
 it "guests: команды создания LXC с /dev/dri"    test_guests_lxc_desktop_commands
 it "guests: пароль не утекает в лог и на экран" test_guests_lxc_password_never_in_log
+it "guests: права на /dev/dri чинятся сами"     test_guests_lxc_fixes_dri_permissions_itself
+
+printf '\nФаза 3: копия конфигурации хоста\n'
+it "config-backup: правило нуля"                test_cfgbackup_zero_rule
+it "config-backup: собирает архив"              test_cfgbackup_creates_archive
+it "config-backup: свежая копия — работы нет"   test_cfgbackup_fresh_copy_is_enough
+it "config-backup: устаревшая копия обновляется" test_cfgbackup_stale_copy_triggers_new_one
+it "config-backup: прореживает старые"          test_cfgbackup_prunes_old_copies
+
+printf '\nКомандная строка\n'
+it "modules: порядок по числовому префиксу"      test_modules_run_in_numeric_order
+it "cli: базовые команды работают"              test_cli_basic_commands_work
+it "cli: пример манифеста проходит проверку"    test_cli_validates_example_manifest
+it "cli: неизвестная команда — ошибка"          test_cli_rejects_unknown_command
+it "cli: говорит, когда пароля нет"             test_cli_password_says_when_there_is_none
+it "cli: apply отказывается вне Proxmox"        test_cli_apply_refuses_on_non_proxmox
 
 printf '\nСтатические проверки\n'
 if ./tests/lint-run-guard.sh >/dev/null 2>&1; then
