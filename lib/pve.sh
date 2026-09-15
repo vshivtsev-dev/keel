@@ -138,3 +138,102 @@ guest_exists() {
   local id=$1
   [[ -f "/etc/pve/qemu-server/${id}.conf" || -f "/etc/pve/lxc/${id}.conf" ]]
 }
+
+# --- Пакеты ------------------------------------------------------------------
+
+# Сколько пакетов ждёт обновления. apt-get -s только моделирует и ничего
+# не меняет, поэтому живёт здесь, среди фактов о хосте.
+apt_upgradable_count() {
+  command -v apt-get >/dev/null 2>&1 || { printf '0'; return 0; }
+  local n
+  n=$(LC_ALL=C apt-get -s dist-upgrade 2>/dev/null | grep -c '^Inst ' || true)
+  printf '%s' "${n:-0}"
+}
+
+apt_upgradable_list() {
+  command -v apt-get >/dev/null 2>&1 || return 0
+  LC_ALL=C apt-get -s dist-upgrade 2>/dev/null | sed -n 's/^Inst \([^ ]*\) .*/\1/p'
+}
+
+# --- Хранилища ---------------------------------------------------------------
+
+_storage_cfg() { fsroot /etc/pve/storage.cfg; }
+
+storage_exists() {
+  local name=$1 cfg; cfg=$(_storage_cfg)
+  [[ -f "$cfg" ]] || return 1
+  grep -qE "^[a-z]+:[[:space:]]+${name}\$" "$cfg"
+}
+
+# Тип хранилища: dir, lvmthin, zfspool ...
+storage_type() {
+  local name=$1 cfg; cfg=$(_storage_cfg)
+  [[ -f "$cfg" ]] || return 1
+  sed -n "s/^\([a-z]\+\):[[:space:]]\+${name}\$/\1/p" "$cfg" | head -n1
+}
+
+# Значение поля внутри блока хранилища (content, path, ...)
+storage_field() {
+  local name=$1 field=$2 cfg; cfg=$(_storage_cfg)
+  [[ -f "$cfg" ]] || return 1
+  awk -v name="$name" -v field="$field" '
+    /^[a-z]+:[[:space:]]+/ { inblock = ($2 == name) }
+    inblock && $1 == field { $1=""; sub(/^[[:space:]]+/,""); print; exit }
+  ' "$cfg"
+}
+
+storage_content() { storage_field "$1" content; }
+
+# Каталог dir-хранилища — туда кладутся образы, шаблоны и сниппеты
+storage_path() { storage_field "$1" path; }
+
+# Хранилище, у которого разрешены сниппеты (нужны для cloud-init)
+storage_with_snippets() {
+  local cfg; cfg=$(_storage_cfg)
+  [[ -f "$cfg" ]] || return 1
+  local name
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    if [[ ",$(storage_content "$name")," == *",snippets,"* ]]; then
+      printf '%s' "$name"; return 0
+    fi
+  done < <(sed -n 's/^[a-z]\+:[[:space:]]\+\(.*\)$/\1/p' "$cfg")
+  return 1
+}
+
+# --- Возможности установленного Proxmox --------------------------------------
+
+# В PVE 8 появился «qm disk import»; старый «qm importdisk» ещё жив, но
+# импорт одной командой через import-from надёжнее: не надо разбирать вывод.
+qm_supports_import_from() {
+  command -v qm >/dev/null 2>&1 || return 1
+  local major; major=$(pve_major)
+  [[ -n "$major" ]] && (( major >= 8 ))
+}
+
+# Проброс устройств в контейнер через ключи dev0..devN (PVE 8.2+).
+pct_supports_dev_keys() {
+  command -v pct >/dev/null 2>&1 || return 1
+  pct help set 2>&1 | grep -q -- '--dev\[n\]\|--dev0'
+}
+
+# Шаблоны LXC, уже скачанные на хост
+pveam_downloaded() {
+  command -v pveam >/dev/null 2>&1 || return 0
+  pveam list local 2>/dev/null | awk 'NR>1 {print $1}'
+}
+
+# Доступные для скачивания шаблоны, отфильтрованные по образцу
+pveam_available() {
+  local pattern=$1
+  command -v pveam >/dev/null 2>&1 || return 0
+  pveam available --section system 2>/dev/null | awk '{print $2}' | grep -E "$pattern" || true
+}
+
+# --- Задания резервного копирования ------------------------------------------
+
+# Список заданий vzdump в JSON. Чтение, ничего не меняет.
+backup_jobs_json() {
+  command -v pvesh >/dev/null 2>&1 || { printf '[]'; return 0; }
+  pvesh get /cluster/backup --output-format json 2>/dev/null || printf '[]'
+}

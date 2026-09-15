@@ -23,7 +23,7 @@ modules_find() {
   while IFS= read -r f; do
     [[ -z "$filter" || "$(module_id "$f")" == "$filter" ]] || continue
     printf '%s\n' "$f"
-  done < <(find "${KEEL_ROOT}/modules" -type f -name '*.sh' 2>/dev/null | sort)
+  done < <(find "${KEEL_ROOT}/modules" -type f -name '*.sh' ! -name '_*' 2>/dev/null | sort)
 }
 
 module_id() {

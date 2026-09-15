@@ -55,6 +55,64 @@ load_keel() {
   state_init
 }
 
+# Подставные команды Proxmox. Записывают свои аргументы в файл, чтобы тест
+# мог проверить, что именно keel собирался выполнить. Заодно гарантия, что
+# ни одна настоящая qm/pct/pvesm в тестах не запустится.
+stub_commands() {
+  export KEEL_STUB_LOG="${T}/commands.log"
+  export KEEL_STUB_OUT="${T}/stub-out"
+  mkdir -p "${T}/bin" "$KEEL_STUB_OUT"
+  : >"$KEEL_STUB_LOG"
+  local cmd
+  for cmd in "$@"; do
+    cat >"${T}/bin/${cmd}" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "${cmd} \$*" >> "\$KEEL_STUB_LOG"
+arg1=\$(printf '%s' "\${1:-}" | tr -c 'a-zA-Z0-9._-' '_')
+if [[ -n "\$arg1" && -f "\$KEEL_STUB_OUT/${cmd}.\$arg1" ]]; then
+  cat "\$KEEL_STUB_OUT/${cmd}.\$arg1"
+elif [[ -f "\$KEEL_STUB_OUT/${cmd}" ]]; then
+  cat "\$KEEL_STUB_OUT/${cmd}"
+fi
+exit 0
+STUB
+    chmod +x "${T}/bin/${cmd}"
+  done
+  export PATH="${T}/bin:${PATH}"
+}
+
+# Что подставная команда ответит: stub_says pvesh.get <<<"[]"
+stub_says() { cat >"${KEEL_STUB_OUT}/$1"; }
+
+# Все записанные вызовы одной строкой — удобно искать подстроки
+stub_log() { cat "$KEEL_STUB_LOG" 2>/dev/null; }
+
+assert_ran() {
+  local needle=$1
+  stub_log | grep -qF -- "$needle" || fail "не нашёл вызов «${needle}». Было:
+$(stub_log)"
+}
+
+assert_not_ran() {
+  local needle=$1
+  stub_log | grep -qF -- "$needle" && fail "команда «${needle}» не должна была выполняться"
+  return 0
+}
+
+# Прогнать одну функцию модуля в подоболочке, вернуть её код
+mod_rc() {
+  local module=$1 verb=$2 rc=0
+  # shellcheck disable=SC1090  # путь к модулю собирается на лету, это и есть смысл
+  ( source "${KEEL_ROOT}/modules/${module}.sh"; "mod_${verb}" ) >/dev/null 2>&1 || rc=$?
+  printf '%s' "$rc"
+}
+
+mod_out() {
+  local module=$1 verb=$2
+  # shellcheck disable=SC1090
+  ( source "${KEEL_ROOT}/modules/${module}.sh"; "mod_${verb}" ) 2>&1 || true
+}
+
 # it "название" функция — каждый тест в своей подоболочке и своём каталоге
 it() {
   local name=$1 fn=$2
@@ -281,6 +339,189 @@ test_repos_never_touches_real_root_in_tests() {
     || fail "тест записал файл в настоящую систему"
 }
 
+
+# --- Модуль обновлений -------------------------------------------------------
+
+test_updates_zero_rule() {
+  config_load "${T}/нет.json"
+  assert_eq "$(mod_rc host/20-updates check)" "20" "без ключа host.updates — ничего не делать"
+}
+
+test_updates_nothing_to_do() {
+  stub_commands apt-get
+  stub_says "apt-get.-s" <<'EOF'
+Reading package lists...
+0 upgraded, 0 newly installed, 0 to remove.
+EOF
+  printf '{ "host": { "updates": true } }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  assert_eq "$(mod_rc host/20-updates check)" "0" "обновлять нечего"
+}
+
+test_updates_applies_dist_upgrade() {
+  stub_commands apt-get
+  stub_says "apt-get.-s" <<'EOF'
+Inst pve-manager [8.2.4] (8.2.5 Proxmox:8.2 [amd64])
+Inst libpve-common-perl [8.2.1] (8.2.2 Proxmox:8.2 [all])
+EOF
+  printf '{ "host": { "updates": true } }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  assert_eq "$(mod_rc host/20-updates check)" "10" "два пакета ждут обновления"
+  assert_contains "$(mod_out host/20-updates check)" "pve-manager"
+
+  export KEEL_MODE="yes"
+  mod_rc host/20-updates apply >/dev/null
+  assert_ran "apt-get update"
+  assert_ran "apt-get -y dist-upgrade"
+}
+
+# --- Модуль хранилищ ---------------------------------------------------------
+
+_fake_storage_cfg() {
+  export KEEL_FS_ROOT="${T}/root"
+  mkdir -p "${KEEL_FS_ROOT}/etc/pve"
+  cat >"${KEEL_FS_ROOT}/etc/pve/storage.cfg" <<'EOF'
+dir: local
+	path /var/lib/vz
+	content iso,vztmpl,backup
+
+lvmthin: local-lvm
+	thinpool data
+	vgname pve
+	content rootdir,images
+EOF
+}
+
+test_storage_reads_config() {
+  _fake_storage_cfg
+  storage_exists local || fail "local должно находиться"
+  storage_exists нет-такого && fail "несуществующее хранилище не должно находиться"
+  assert_eq "$(storage_type local)" "dir"
+  assert_eq "$(storage_path local)" "/var/lib/vz"
+  assert_eq "$(storage_content local-lvm)" "rootdir,images"
+}
+
+test_storage_adds_missing_content() {
+  _fake_storage_cfg
+  stub_commands pvesm
+  printf '{ "storages": [ { "name": "local", "content": ["iso","vztmpl","backup","snippets"] } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  assert_eq "$(mod_rc host/30-storage check)" "10" "не хватает snippets"
+  assert_contains "$(mod_out host/30-storage check)" "snippets"
+
+  export KEEL_MODE="yes"
+  mod_rc host/30-storage apply >/dev/null
+  assert_ran "pvesm set local --content backup,iso,snippets,vztmpl"
+}
+
+test_storage_already_correct() {
+  _fake_storage_cfg
+  stub_commands pvesm
+  printf '{ "storages": [ { "name": "local", "content": ["backup","iso","vztmpl"] } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  assert_eq "$(mod_rc host/30-storage check)" "0" "порядок в списке не должен считаться расхождением"
+}
+
+test_storage_creates_dir_storage() {
+  _fake_storage_cfg
+  stub_commands pvesm mkdir
+  printf '{ "storages": [ { "name": "media", "type": "dir", "path": "/mnt/media", "content": ["iso"] } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  assert_eq "$(mod_rc host/30-storage check)" "10"
+
+  export KEEL_MODE="yes"
+  mod_rc host/30-storage apply >/dev/null
+  assert_ran "pvesm add dir media --path /mnt/media --content iso"
+}
+
+test_storage_refuses_to_invent_lvm() {
+  _fake_storage_cfg
+  stub_commands pvesm
+  printf '{ "storages": [ { "name": "tank", "content": ["images"] } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+  mod_rc host/30-storage apply >/dev/null
+  assert_not_ran "pvesm add"
+}
+
+test_storage_ignores_unlisted() {
+  _fake_storage_cfg
+  stub_commands pvesm
+  printf '{ "storages": [ { "name": "local", "content": ["backup","iso","vztmpl"] } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+  mod_rc host/30-storage apply >/dev/null
+  assert_not_ran "local-lvm"
+}
+
+# --- Модуль резервного копирования -------------------------------------------
+
+_manifest_backup() {
+  cat >"${T}/m.json" <<'EOF'
+{
+  "backup": {
+    "schedule": "02:00",
+    "storage": "local",
+    "mode": "snapshot",
+    "guests": [100, 101],
+    "keep_last": 3
+  }
+}
+EOF
+  config_load "${T}/m.json"
+}
+
+test_backup_zero_rule() {
+  stub_commands pvesh
+  config_load "${T}/нет.json"
+  assert_eq "$(mod_rc host/40-backup-jobs check)" "20"
+}
+
+test_backup_creates_job() {
+  stub_commands pvesh
+  stub_says "pvesh.get" <<<'[]'
+  _manifest_backup
+  assert_eq "$(mod_rc host/40-backup-jobs check)" "10" "задания нет — надо создать"
+
+  export KEEL_MODE="yes"
+  mod_rc host/40-backup-jobs apply >/dev/null
+  assert_ran "pvesh create /cluster/backup"
+  assert_ran "--schedule 02:00"
+  assert_ran "--vmid 100,101"
+  assert_ran "--prune-backups keep-last=3"
+  assert_ran "--comment keel"
+}
+
+test_backup_updates_existing_job() {
+  stub_commands pvesh
+  stub_says "pvesh.get" <<<'[{"id":"backup-abc","comment":"keel","schedule":"04:00","storage":"local","mode":"snapshot","vmid":"100,101"}]'
+  _manifest_backup
+  assert_eq "$(mod_rc host/40-backup-jobs check)" "10" "расписание отличается"
+  assert_contains "$(mod_out host/40-backup-jobs check)" "04:00"
+
+  export KEEL_MODE="yes"
+  mod_rc host/40-backup-jobs apply >/dev/null
+  assert_ran "pvesh set /cluster/backup/backup-abc"
+}
+
+test_backup_matching_job_is_left_alone() {
+  stub_commands pvesh
+  stub_says "pvesh.get" <<<'[{"id":"backup-abc","comment":"keel","schedule":"02:00","storage":"local","mode":"snapshot","vmid":"100,101"}]'
+  _manifest_backup
+  assert_eq "$(mod_rc host/40-backup-jobs check)" "0" "совпадающее задание не трогаем"
+}
+
+test_backup_ignores_foreign_jobs() {
+  stub_commands pvesh
+  stub_says "pvesh.get" <<<'[{"id":"backup-чужое","comment":"сделано руками","schedule":"05:00","storage":"pbs"}]'
+  _manifest_backup
+  assert_eq "$(mod_rc host/40-backup-jobs check)" "10" "чужое задание не считается нашим"
+  export KEEL_MODE="yes"
+  mod_rc host/40-backup-jobs apply >/dev/null
+  assert_ran "pvesh create /cluster/backup"
+  assert_not_ran "pvesh set"
+}
+
 # --- Запуск ------------------------------------------------------------------
 
 printf '\nМанифест\n'
@@ -305,6 +546,22 @@ it "repos: применение и идемпотентность"        test_r
 it "repos: старый формат .list"                 test_repos_old_list_format
 it "repos: отвергает неизвестное значение"      test_repos_rejects_unknown_value
 it "repos: не трогает настоящую систему"        test_repos_never_touches_real_root_in_tests
+
+printf '\nФаза 1: хост\n'
+it "updates: правило нуля"                      test_updates_zero_rule
+it "updates: обновлять нечего"                  test_updates_nothing_to_do
+it "updates: ставит dist-upgrade"               test_updates_applies_dist_upgrade
+it "storage: чтение storage.cfg"                test_storage_reads_config
+it "storage: доводит content до описанного"     test_storage_adds_missing_content
+it "storage: порядок в списке не важен"         test_storage_already_correct
+it "storage: создаёт dir-хранилище"             test_storage_creates_dir_storage
+it "storage: не выдумывает LVM"                 test_storage_refuses_to_invent_lvm
+it "storage: не трогает чужие хранилища"        test_storage_ignores_unlisted
+it "backup: правило нуля"                       test_backup_zero_rule
+it "backup: создаёт задание"                    test_backup_creates_job
+it "backup: обновляет своё задание"             test_backup_updates_existing_job
+it "backup: совпадающее не трогает"             test_backup_matching_job_is_left_alone
+it "backup: не присваивает чужие задания"       test_backup_ignores_foreign_jobs
 
 printf '\nСтатические проверки\n'
 if ./tests/lint-run-guard.sh >/dev/null 2>&1; then

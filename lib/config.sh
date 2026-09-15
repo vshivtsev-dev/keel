@@ -41,8 +41,8 @@ sub walk {
     emit($prefix eq "" ? "__keys" : "$prefix.__keys", join(",", @k));
     walk($prefix eq "" ? $_ : "$prefix.$_", $node->{$_}) for @k;
   } elsif ($r eq "ARRAY") {
-    emit("$prefix.__len", scalar(@$node));
-    walk("$prefix.$_", $node->[$_]) for (0 .. $#$node);
+    emit($prefix eq "" ? "__len" : "$prefix.__len", scalar(@$node));
+    walk($prefix eq "" ? "$_" : "$prefix.$_", $node->[$_]) for (0 .. $#$node);
   } elsif (!defined $node) {
     emit($prefix, "");
   } elsif (JSON::PP::is_bool($node)) {
@@ -198,4 +198,90 @@ config_validate() {
     fi
   done
   return "$rc"
+}
+
+# --- Разбор произвольного JSON ----------------------------------------------
+#
+# Нужен для ответов pvesh: тот же парсер, что и для манифеста, никаких jq.
+
+# json_pairs <<<"$json" — печатает key=value, записи разделены нулевым байтом
+json_pairs() {
+  KEEL_RELAXED=1 _config_perl_flatten
+}
+
+# json_get "$json" "путь.к.ключу" ["по умолчанию"]
+json_get() {
+  local json=$1 want=$2 default=${3:-} rec
+  while IFS= read -r -d '' rec; do
+    if [[ "${rec%%=*}" == "$want" ]]; then
+      printf '%s' "${rec#*=}"
+      return 0
+    fi
+  done < <(printf '%s' "$json" | json_pairs 2>/dev/null)
+  printf '%s' "$default"
+}
+
+# json_len "$json" "путь" — длина массива
+json_len() { json_get "$1" "$(_config_meta "$2" __len)" 0; }
+
+# --- Профили гостей ----------------------------------------------------------
+#
+# Профиль — «рецепт»: откуда образ, какие дефолты, какого рода гость.
+# Лежит в profiles/<имя>.json и читается тем же парсером.
+
+declare -gA KEEL_PROF=()
+KEEL_PROF_NAME=""
+
+profile_load() {
+  local name=$1
+  local path="${KEEL_ROOT}/profiles/${name}.json"
+  KEEL_PROF=()
+  KEEL_PROF_NAME=""
+  [[ -f "$path" ]] || { err "Нет профиля «${name}» (ожидался файл ${path})"; return 1; }
+
+  local src rec
+  if config_relaxed_supported; then
+    src=$(cat "$path"); export KEEL_RELAXED=1
+  else
+    src=$(_config_strip_comments <"$path"); unset KEEL_RELAXED
+  fi
+
+  local errfile; errfile=$(mktemp)
+  while IFS= read -r -d '' rec; do
+    KEEL_PROF["${rec%%=*}"]=${rec#*=}
+  done < <(printf '%s' "$src" | _config_perl_flatten 2>"$errfile")
+
+  if [[ -s "$errfile" ]]; then
+    local msg; msg=$(cat "$errfile"); rm -f "$errfile"
+    err "Профиль ${path} не читается: ${msg}"
+    return 1
+  fi
+  rm -f "$errfile"
+  KEEL_PROF_NAME=$name
+  return 0
+}
+
+# Имя загруженного профиля — модулям нужно для сообщений
+profile_name() { printf '%s' "$KEEL_PROF_NAME"; }
+
+prof_get() {
+  local key=$1 default=${2:-}
+  if [[ -n "${KEEL_PROF[$key]+x}" ]]; then printf '%s' "${KEEL_PROF[$key]}"
+  else printf '%s' "$default"; fi
+}
+
+prof_len() { prof_get "$1.__len" 0; }
+
+prof_bool() {
+  local v; v=$(prof_get "$1" "${2:-false}")
+  [[ "$v" == "true" || "$v" == "1" ]]
+}
+
+profile_list() {
+  local f
+  for f in "${KEEL_ROOT}"/profiles/*.json; do
+    [[ -f "$f" ]] || continue
+    f=${f##*/}
+    printf '%s\n' "${f%.json}"
+  done
 }
