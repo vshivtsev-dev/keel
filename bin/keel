@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+#
+# keel — сборка и восстановление хоста Proxmox VE.
+#
+#   keel              открыть меню
+#   keel plan         показать, что изменится (ничего не трогает)
+#   keel apply        применить манифест
+#   keel doctor       отчёт о состоянии хоста
+#
+# Полная справка: keel help
+
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+KEEL_VERSION="0.1.0"
+
+# Каталог проекта: работает и при запуске из репозитория, и через симлинк
+_self=${BASH_SOURCE[0]}
+if command -v readlink >/dev/null 2>&1; then
+  _self=$(readlink -f "$_self" 2>/dev/null || printf '%s' "$_self")
+fi
+KEEL_ROOT=$(cd "$(dirname "$_self")/.." && pwd)
+export KEEL_ROOT KEEL_VERSION
+
+# shellcheck source=../lib/core.sh
+source "${KEEL_ROOT}/lib/core.sh"
+# shellcheck source=../lib/ui.sh
+source "${KEEL_ROOT}/lib/ui.sh"
+# shellcheck source=../lib/config.sh
+source "${KEEL_ROOT}/lib/config.sh"
+# shellcheck source=../lib/state.sh
+source "${KEEL_ROOT}/lib/state.sh"
+# shellcheck source=../lib/pve.sh
+source "${KEEL_ROOT}/lib/pve.sh"
+# shellcheck source=../lib/modules.sh
+source "${KEEL_ROOT}/lib/modules.sh"
+# shellcheck source=../lib/doctor.sh
+source "${KEEL_ROOT}/lib/doctor.sh"
+
+KEEL_MANIFEST="${KEEL_MANIFEST:-${KEEL_ROOT}/manifest/host.json}"
+KEEL_ONLY=""
+
+usage() {
+  cat <<'EOF'
+keel — сборка и восстановление хоста Proxmox VE.
+
+Использование:
+  keel [флаги] [команда]
+
+Команды:
+  menu        интерактивное меню (по умолчанию)
+  plan        показать список изменений, ничего не выполняя
+  apply       применить манифест
+  verify      проверить, соответствует ли хост манифесту
+  doctor      отчёт о состоянии хоста и о видеокарте
+  validate    проверить манифест на ошибки
+  modules     список модулей
+  logs        показать последний лог
+  version     версия
+  help        эта справка
+
+Флаги:
+  --yes            не спрашивать перед каждым изменением
+                   (только после того, как посмотрел plan)
+  --dry-run        ничего не выполнять, только показывать команды
+  --only ID        работать с одним модулем, например: --only host/10-repos
+  --manifest PATH  другой файл манифеста
+  --plain          без псевдографики, обычным текстом
+
+Порядок, который экономит нервы:
+  keel doctor  →  keel plan  →  keel apply
+EOF
+}
+
+parse_args() {
+  local positional=()
+  while (( $# )); do
+    # shellcheck disable=SC2034  # KEEL_UI читается в lib/ui.sh
+    case "$1" in
+      --yes|-y)   KEEL_MODE="yes" ;;
+      --dry-run)  KEEL_MODE="dry" ;;
+      --plain)    KEEL_UI="plain" ;;
+      --only)     shift; KEEL_ONLY=${1:-} ;;
+      --manifest) shift; KEEL_MANIFEST=${1:-} ;;
+      -h|--help)  usage; exit 0 ;;
+      --*)        die "Неизвестный флаг: $1 (см. keel help)" ;;
+      *)          positional+=("$1") ;;
+    esac
+    shift || true
+  done
+  KEEL_CMD=${positional[0]:-menu}
+}
+
+# Применять что-либо к машине, которая не является хостом Proxmox, почти
+# наверняка ошибка. Обойти можно осознанно: KEEL_ALLOW_NON_PVE=1.
+need_pve() {
+  [[ -n "$KEEL_FS_ROOT" ]] && return 0
+  [[ "${KEEL_ALLOW_NON_PVE:-}" == "1" ]] && return 0
+  pve_is_host && return 0
+  die "Это не хост Proxmox VE. Если уверен — KEEL_ALLOW_NON_PVE=1 keel apply"
+}
+
+show_logs() {
+  if [[ -n "${KEEL_LOG_FILE:-}" && -f "$KEEL_LOG_FILE" ]]; then
+    ui_msgbox "Лог текущего запуска" "$(tail -n 200 "$KEEL_LOG_FILE")"
+  else
+    ui_msgbox "Логи" "Логов пока нет."
+  fi
+}
+
+pick_modules() {
+  local args=() id title
+  while IFS=$'\t' read -r id title; do
+    [[ -n "$id" ]] || continue
+    args+=("$id" "${id}  —  ${title}" "off")
+  done < <(modules_list_ids)
+  (( ${#args[@]} )) || { ui_msgbox "Модули" "Модулей пока нет."; return 0; }
+
+  local chosen
+  chosen=$(ui_checklist "Выбор модулей" "Отметь, что применить:" "${args[@]}")
+  [[ -n "$chosen" ]] || return 0
+
+  local m
+  for m in $chosen; do
+    m=${m//\"/}
+    modules_apply "$m"
+  done
+}
+
+menu_loop() {
+  while true; do
+    local choice
+    choice=$(ui_menu "keel ${KEEL_VERSION}" \
+      "Хост: $(hostname 2>/dev/null || echo '?')    Режим: ${KEEL_MODE}" \
+      plan    "1  Показать план — ничего не меняет" \
+      apply   "2  Применить всё из манифеста" \
+      pick    "3  Выбрать отдельные модули" \
+      verify  "4  Проверить соответствие манифесту" \
+      doctor  "5  Состояние хоста и видеокарты" \
+      logs    "6  Логи последнего запуска" \
+      quit    "0  Выход")
+
+    case "$choice" in
+      plan)   modules_plan "$KEEL_ONLY";   _pause ;;
+      apply)  modules_apply "$KEEL_ONLY";  _pause ;;
+      pick)   pick_modules;                _pause ;;
+      verify) modules_verify "$KEEL_ONLY"; _pause ;;
+      doctor) doctor_run;                  _pause ;;
+      logs)   show_logs ;;
+      quit|"") return 0 ;;
+    esac
+  done
+}
+
+_pause() {
+  if ui_has_whiptail; then
+    printf '\n'
+    read -r -n1 -p "Нажми любую клавишу, чтобы вернуться в меню..." _ </dev/tty || true
+    printf '\n'
+  fi
+}
+
+main() {
+  parse_args "$@"
+  core_init
+  state_init
+  config_load "$KEEL_MANIFEST"
+
+  case "$KEEL_CMD" in
+    menu)     menu_loop ;;
+    plan)     modules_plan "$KEEL_ONLY" ;;
+    apply)    need_root; need_pve; modules_apply "$KEEL_ONLY" ;;
+    verify)   modules_verify "$KEEL_ONLY" ;;
+    doctor)   doctor_run ;;
+    validate)
+      if config_validate; then ok "Манифест в порядке."; else die "В манифесте есть ошибки."; fi ;;
+    modules)  modules_list_ids | column -t -s $'\t' 2>/dev/null || modules_list_ids ;;
+    logs)     if [[ -f "$KEEL_LOG_FILE" ]]; then cat "$KEEL_LOG_FILE"; fi ;;
+    version)  printf 'keel %s\n' "$KEEL_VERSION" ;;
+    help)     usage ;;
+    *)        die "Неизвестная команда: ${KEEL_CMD} (см. keel help)" ;;
+  esac
+}
+
+main "$@"
