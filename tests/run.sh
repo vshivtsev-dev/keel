@@ -142,6 +142,33 @@ it() {
   fi
 }
 
+# --- Окружение ---------------------------------------------------------------
+#
+# Допущения, на которых построен keel. В контейнере Debian 13 это прямой
+# ответ на вопрос «а будет ли оно работать на Proxmox VE 9».
+
+test_env_perl_json_pp() {
+  config_parser_available || fail "нет perl с JSON::PP — читать манифест нечем"
+}
+
+test_env_relaxed_comments_and_commas() {
+  # Ради этого и выбран JSON вместо YAML: парсер есть всегда, а relaxed
+  # даёт комментарии. Если допущение неверно — знать об этом надо сразу.
+  config_relaxed_supported || fail "JSON::PP не поддерживает relaxed на этой системе"
+
+  printf '{\n# решётка\n"a": 1,\n// две косые\n"b": [1, 2,],\n}' >"${T}/m.json"
+  config_load "${T}/m.json"
+  assert_eq "$(config_get a)" "1" "комментарий через #"
+  assert_eq "$(config_len b)" "2" "комментарий через // и висячие запятые"
+}
+
+test_env_utf8_locale_available() {
+  # Без UTF-8 локали ${#s} считает байты, и весь вывод с русскими
+  # подписями разъезжается по колонкам
+  local padded; padded=$(pad "Проверка" 12)
+  assert_eq "${#padded}" "12" "нет UTF-8 локали — вывод будет кривым"
+}
+
 # --- Манифест ----------------------------------------------------------------
 
 test_config_comments() {
@@ -904,6 +931,17 @@ test_cli_apply_refuses_on_non_proxmox() {
 }
 
 # --- Запуск ------------------------------------------------------------------
+
+printf '\nОкружение\n'
+it "env: perl с JSON::PP на месте"              test_env_perl_json_pp
+it "env: relaxed — комментарии и запятые"       test_env_relaxed_comments_and_commas
+it "env: UTF-8 локаль для выравнивания"         test_env_utf8_locale_available
+
+# Не тесты, а справка: что именно за система под нами.
+# Без выравнивания по колонкам — printf считает байты, а не символы.
+printf '  · система: %s\n' "$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-неизвестно}")"
+printf '  · bash %s, perl %s\n' "${BASH_VERSION}" "$(perl -e 'print $]' 2>/dev/null || echo '—')"
+printf '  · whiptail: %s\n' "$(command -v whiptail >/dev/null && echo 'есть' || echo 'нет, меню будет текстовым')"
 
 printf '\nМанифест\n'
 it "config: комментарии в JSON"                 test_config_comments
