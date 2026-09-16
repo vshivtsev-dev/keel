@@ -57,12 +57,12 @@ pve_bootloader() {
     printf 'grub (через proxmox-boot-tool)'
     return
   fi
-  if [[ -f /etc/default/grub ]]; then printf 'grub'; else printf 'неизвестно'; fi
+  if [[ -f "$(fsroot /etc/default/grub)" ]]; then printf 'grub'; else printf 'неизвестно'; fi
 }
 
 # Включён ли IOMMU прямо сейчас (а не "должен быть включён в BIOS")
 host_iommu_enabled() {
-  compgen -G "/sys/class/iommu/*" >/dev/null 2>&1 || return 1
+  compgen -G "$(fsroot /sys/class/iommu)/*" >/dev/null 2>&1 || return 1
   return 0
 }
 
@@ -92,7 +92,7 @@ gpu_list() {
 # В какой IOMMU-группе сидит устройство. Пусто — группы нет (IOMMU выключен).
 iommu_group_of() {
   local addr=$1 path
-  for path in /sys/kernel/iommu_groups/*/devices/*"${addr}"; do
+  for path in "$(fsroot /sys/kernel/iommu_groups)"/*/devices/*"${addr}"; do
     [[ -e "$path" ]] || continue
     path=${path%/devices/*}
     printf '%s' "${path##*/}"
@@ -104,7 +104,7 @@ iommu_group_of() {
 # Кто ещё сидит в той же группе — решает, можно ли пробросить карту отдельно
 iommu_group_members() {
   local group=$1 dev
-  for dev in /sys/kernel/iommu_groups/"${group}"/devices/*; do
+  for dev in "$(fsroot /sys/kernel/iommu_groups)/${group}"/devices/*; do
     [[ -e "$dev" ]] || continue
     printf '%s\n' "$(basename "$dev")"
   done

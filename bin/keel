@@ -34,6 +34,8 @@ source "${KEEL_ROOT}/lib/state.sh"
 source "${KEEL_ROOT}/lib/pve.sh"
 # shellcheck source=../lib/guests.sh
 source "${KEEL_ROOT}/lib/guests.sh"
+# shellcheck source=../lib/gpu.sh
+source "${KEEL_ROOT}/lib/gpu.sh"
 # shellcheck source=../lib/modules.sh
 source "${KEEL_ROOT}/lib/modules.sh"
 # shellcheck source=../lib/doctor.sh
@@ -59,6 +61,7 @@ keel — сборка и восстановление хоста Proxmox VE.
   doctor      отчёт о состоянии хоста и о видеокарте
   validate    проверить манифест на ошибки
   backup      снять копию конфигурации хоста прямо сейчас
+  gpu revert  откатить проброс видеокарты
   password ID показать пароль, сгенерированный для гостя
   external    внешние инструменты (community-scripts)
   modules     список модулей
@@ -106,6 +109,19 @@ need_pve() {
   [[ "${KEEL_ALLOW_NON_PVE:-}" == "1" ]] && return 0
   pve_is_host && return 0
   die "Это не хост Proxmox VE. Если уверен — KEEL_ALLOW_NON_PVE=1 keel apply"
+}
+
+# Проброс видеокарты живёт отдельной командой: откат должен быть доступен
+# даже когда манифест уже поправлен и модуль о пробросе больше не знает.
+gpu_command() {
+  case "${1:-}" in
+    revert) need_root; gpu_revert ;;
+    status)
+      if [[ -f "$(gpu_state_file)" ]]; then cat "$(gpu_state_file)"
+      else info "Записи о пробросе нет — видеокарта не отдавалась."; fi
+      ;;
+    *) die "keel gpu revert — откатить проброс; keel gpu status — что записано" ;;
+  esac
 }
 
 # Пароли гостей в манифесте не хранятся — только здесь, и только для root
@@ -196,6 +212,7 @@ main() {
     validate)
       if config_validate; then ok "Манифест в порядке."; else die "В манифесте есть ошибки."; fi ;;
     backup)   need_root; need_pve; modules_apply host/90-config-backup ;;
+    gpu)      gpu_command "${KEEL_ARGV[1]:-}" ;;
     password) show_password "${KEEL_ARGV[1]:-}" ;;
     external) need_root; external_menu ;;
     modules)  modules_list_ids | column -t -s $'\t' 2>/dev/null || modules_list_ids ;;

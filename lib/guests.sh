@@ -28,7 +28,7 @@ guest_profile_name() {
   case "$graphics" in
     dri)         printf 'desktop-lxc' ;;
     virgl)       printf 'desktop-vm' ;;
-    passthrough) printf 'desktop-vm' ;;   # проброс припаркован, см. docs/BACKLOG.md
+    passthrough) printf 'desktop-vm-gpu' ;;
     *)           printf '' ;;
   esac
 }
@@ -352,6 +352,13 @@ vm_create_cloudinit() {
 
   _vm_base_args "$i"
   run "Создать виртуальную машину ${id} (${name})" qm create "$id" "${KEEL_ARGS[@]}" || return $?
+
+  if prof_bool vm.efidisk; then
+    local keys=0
+    prof_bool vm.pre_enrolled_keys && keys=1
+    run "Добавить EFI-диск" \
+      qm set "$id" --efidisk0 "${storage}:0,efitype=4m,pre-enrolled-keys=${keys}" || return $?
+  fi
 
   run "Импортировать облачный образ в диск ВМ" \
     qm set "$id" --scsi0 "${storage}:0,import-from=${KEEL_IMAGE_PATH},discard=on,ssd=1" || return $?

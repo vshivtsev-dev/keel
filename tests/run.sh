@@ -54,6 +54,8 @@ load_keel() {
   source "${KEEL_ROOT}/lib/pve.sh"
   # shellcheck source=../lib/guests.sh
   source "${KEEL_ROOT}/lib/guests.sh"
+  # shellcheck source=../lib/gpu.sh
+  source "${KEEL_ROOT}/lib/gpu.sh"
   # shellcheck source=../lib/modules.sh
   source "${KEEL_ROOT}/lib/modules.sh"
   core_init
@@ -884,13 +886,228 @@ test_guests_lxc_fixes_dri_permissions_itself() {
 }
 
 test_modules_run_in_numeric_order() {
-  # Гости создаются после хранилищ, а копия конфигурации — последней.
+  # Гости создаются после хранилищ, проброс видеокарты — после гостей
+  # (иначе отдавать её некому), копия конфигурации — последней.
   # Порядок задаёт числовой префикс имени, а не каталог, в котором
   # модуль лежит: иначе guests/ оказывался бы раньше host/ по алфавиту.
   local order
   order=$(modules_list_ids | cut -f1 | paste -sd' ' -)
   assert_eq "$order" \
-    "host/10-repos host/20-updates host/30-storage host/40-backup-jobs guests/50-guests host/90-config-backup"
+    "host/10-repos host/20-updates host/30-storage host/40-backup-jobs guests/50-guests host/60-gpu-passthrough host/90-config-backup"
+}
+
+
+# --- Проброс видеокарты (вариант C) ------------------------------------------
+
+# Хост с одной видеокартой в своей IOMMU-группе — как на живом ga8
+_fake_gpu_host() {
+  export KEEL_FS_ROOT="${T}/root"
+  mkdir -p "${KEEL_FS_ROOT}/etc/default" "${KEEL_FS_ROOT}/etc/modprobe.d" \
+           "${KEEL_FS_ROOT}/etc/pve/qemu-server" \
+           "${KEEL_FS_ROOT}/sys/class/iommu/ivhd0" \
+           "${KEEL_FS_ROOT}/sys/kernel/iommu_groups/16/devices"
+  : >"${KEEL_FS_ROOT}/sys/kernel/iommu_groups/16/devices/0000:64:00.0"
+  printf 'GRUB_CMDLINE_LINUX_DEFAULT="quiet"\nGRUB_TIMEOUT=5\n' \
+    >"${KEEL_FS_ROOT}/etc/default/grub"
+  printf '# /etc/modules\n' >"${KEEL_FS_ROOT}/etc/modules"
+  printf 'cores: 4\nmemory: 8192\n' >"${KEEL_FS_ROOT}/etc/pve/qemu-server/201.conf"
+
+  # cp и rm намеренно НЕ подменяем: ими пользуется откат, и проверять его
+  # имеет смысл только с настоящими
+  stub_commands lspci qm update-grub update-initramfs
+  stub_says "lspci.-mm" <<'EOF'
+64:00.0 "VGA compatible controller" "AMD" "Phoenix3" -rb3 -p00 "Unknown vendor" "Device 1001"
+EOF
+  stub_says "lspci.-k" <<'EOF'
+64:00.0 VGA compatible controller: AMD Phoenix3
+	Kernel driver in use: amdgpu
+EOF
+  stub_says "lspci.-n" <<'EOF'
+64:00.0 0300: 1002:1900 (rev c1)
+EOF
+}
+
+_manifest_gpu() {
+  cat >"${T}/m.json" <<'EOF'
+{ "host": { "gpu_passthrough": { "enabled": true, "device": "auto", "vm": 201 } } }
+EOF
+  config_load "${T}/m.json"
+}
+
+# Подтверждение с набором адреса: в тестах отвечаем за пользователя.
+# Значение кладём в обычную переменную, а не в local: функция ui_input
+# вызывается позже, когда local уже вышел из области видимости.
+_answer_confirm() {
+  KEEL_TEST_ANSWER=$1
+  ui_input() { printf '%s' "$KEEL_TEST_ANSWER"; }
+}
+
+# Параметры ядра зависят от производителя процессора, а тесты должны давать
+# один и тот же результат на любой машине
+_pretend_cpu() {
+  KEEL_TEST_CPU=$1
+  host_cpu_vendor() { printf '%s' "$KEEL_TEST_CPU"; }
+}
+
+test_gpu_zero_rule() {
+  _fake_gpu_host
+  config_load "${T}/нет.json"
+  assert_eq "$(mod_rc host/60-gpu-passthrough check)" "20" "без ключа — ничего не делать"
+
+  printf '{ "host": { "gpu_passthrough": { "enabled": false, "vm": 201 } } }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  assert_eq "$(mod_rc host/60-gpu-passthrough check)" "20" "enabled=false — тоже ничего"
+}
+
+test_gpu_resolves_single_card() {
+  _fake_gpu_host
+  _manifest_gpu
+  gpu_resolve_device auto || fail "не определилась единственная видеокарта"
+  assert_eq "$KEEL_GPU_ADDR" "64:00.0"
+  assert_eq "$KEEL_GPU_IDS" "1002:1900" "ID устройства для привязки к vfio-pci"
+}
+
+test_gpu_refuses_without_iommu() {
+  _fake_gpu_host
+  rm -rf "${KEEL_FS_ROOT}/sys/class/iommu"
+  _manifest_gpu
+  local out; out=$(mod_out host/60-gpu-passthrough check)
+  assert_contains "$out" "IOMMU выключен"
+  assert_eq "$(mod_rc host/60-gpu-passthrough check)" "1" "без IOMMU — отказ, а не попытка"
+}
+
+test_gpu_refuses_on_shared_group() {
+  _fake_gpu_host
+  # Подселяем соседа в ту же группу: пробрасывать придётся вместе с ним
+  : >"${KEEL_FS_ROOT}/sys/kernel/iommu_groups/16/devices/0000:64:00.1"
+  _manifest_gpu
+  local out; out=$(mod_out host/60-gpu-passthrough check)
+  assert_contains "$out" "делится с другими устройствами"
+  assert_eq "$(mod_rc host/60-gpu-passthrough check)" "1"
+}
+
+test_gpu_apply_writes_everything() {
+  _fake_gpu_host
+  _manifest_gpu
+  export KEEL_MODE="yes"
+  _answer_confirm "64:00.0"
+  _pretend_cpu AMD
+
+  assert_eq "$(mod_rc host/60-gpu-passthrough check)" "10" "на чистом хосте есть что менять"
+  local out rc=0
+  out=$( source "${KEEL_ROOT}/modules/host/60-gpu-passthrough.sh"; mod_apply 2>&1 ) || rc=$?
+  (( rc == 0 )) || fail "применение не удалось (код ${rc}):
+${out}"
+
+  # Параметры ядра добавлены к существующим, а не затёрли их
+  local grub; grub=$(cat "${KEEL_FS_ROOT}/etc/default/grub")
+  assert_contains "$grub" 'GRUB_CMDLINE_LINUX_DEFAULT="quiet amd_iommu=on iommu=pt"'
+  assert_contains "$grub" "GRUB_TIMEOUT=5"
+
+  local modules; modules=$(cat "${KEEL_FS_ROOT}/etc/modules")
+  assert_contains "$modules" "vfio_pci"
+
+  local conf; conf=$(cat "${KEEL_FS_ROOT}/etc/modprobe.d/keel-vfio.conf")
+  assert_contains "$conf" "options vfio-pci ids=1002:1900"
+  assert_contains "$conf" "softdep amdgpu pre: vfio-pci"
+  assert_contains "$conf" "blacklist amdgpu"
+
+  assert_ran "update-grub"
+  assert_ran "update-initramfs -u -k all"
+  assert_ran "qm set 201 --hostpci0 64:00.0,pcie=1"
+}
+
+test_gpu_apply_is_idempotent() {
+  _fake_gpu_host
+  _manifest_gpu
+  export KEEL_MODE="yes"
+  _answer_confirm "64:00.0"
+  _pretend_cpu AMD
+  ( source "${KEEL_ROOT}/modules/host/60-gpu-passthrough.sh"; mod_apply ) >/dev/null 2>&1
+  # ВМ уже получила устройство — отражаем это в её конфиге
+  printf 'hostpci0: 64:00.0,pcie=1\n' >>"${KEEL_FS_ROOT}/etc/pve/qemu-server/201.conf"
+  assert_eq "$(mod_rc host/60-gpu-passthrough check)" "0" "повторный запуск: менять нечего"
+}
+
+test_gpu_refuses_without_confirmation() {
+  _fake_gpu_host
+  _manifest_gpu
+  export KEEL_MODE="yes"
+  _answer_confirm "не то слово"
+  _pretend_cpu AMD
+
+  ( source "${KEEL_ROOT}/modules/host/60-gpu-passthrough.sh"; mod_apply ) >/dev/null 2>&1
+  [[ -f "${KEEL_FS_ROOT}/etc/modprobe.d/keel-vfio.conf" ]] \
+    && fail "без подтверждения устройство не должно уходить от хоста"
+  assert_not_ran "qm set 201 --hostpci0"
+}
+
+test_gpu_state_records_changes() {
+  _fake_gpu_host
+  _manifest_gpu
+  export KEEL_MODE="yes"
+  _answer_confirm "64:00.0"
+  _pretend_cpu AMD
+  ( source "${KEEL_ROOT}/modules/host/60-gpu-passthrough.sh"; mod_apply ) >/dev/null 2>&1
+
+  local state; state=$(cat "$(gpu_state_file)")
+  assert_eq "$(json_get "$state" device)" "64:00.0"
+  assert_eq "$(json_get "$state" ids)" "1002:1900"
+  assert_eq "$(json_get "$state" vm)" "201"
+  # grub и modules существовали до нас — их правим; modprobe.d создаём
+  assert_contains "$state" "etc/default/grub"
+  assert_contains "$state" "etc/modprobe.d/keel-vfio.conf"
+  [[ -n "$(json_get "$state" stamp)" ]] || fail "не записана метка резервных копий"
+}
+
+test_gpu_revert_restores_files() {
+  _fake_gpu_host
+  _manifest_gpu
+  local grub_before; grub_before=$(cat "${KEEL_FS_ROOT}/etc/default/grub")
+  local modules_before; modules_before=$(cat "${KEEL_FS_ROOT}/etc/modules")
+
+  export KEEL_MODE="yes"
+  _answer_confirm "64:00.0"
+  _pretend_cpu AMD
+  ( source "${KEEL_ROOT}/modules/host/60-gpu-passthrough.sh"; mod_apply ) >/dev/null 2>&1
+  printf 'hostpci0: 64:00.0,pcie=1\n' >>"${KEEL_FS_ROOT}/etc/pve/qemu-server/201.conf"
+
+  # Откат идёт по записи, а не по догадке: cp и rm здесь настоящие
+  stub_commands lspci qm update-grub update-initramfs
+  stub_says "lspci.-mm" <<'EOF'
+64:00.0 "VGA compatible controller" "AMD" "Phoenix3" -rb3 -p00 "Unknown vendor" "Device 1001"
+EOF
+  stub_says "lspci.-n" <<'EOF'
+64:00.0 0300: 1002:1900 (rev c1)
+EOF
+  gpu_revert >/dev/null 2>&1 || fail "откат не удался"
+
+  assert_eq "$(cat "${KEEL_FS_ROOT}/etc/default/grub")" "$grub_before" "grub вернулся как был"
+  assert_eq "$(cat "${KEEL_FS_ROOT}/etc/modules")" "$modules_before" "/etc/modules вернулся как был"
+  [[ -f "${KEEL_FS_ROOT}/etc/modprobe.d/keel-vfio.conf" ]] \
+    && fail "созданный файл привязки должен быть удалён"
+  [[ -f "$(gpu_state_file)" ]] && fail "запись о пробросе должна исчезнуть"
+  assert_ran "qm set 201 --delete hostpci0"
+  return 0
+}
+
+test_gpu_revert_without_state_says_so() {
+  _fake_gpu_host
+  local rc=0
+  gpu_revert >/dev/null 2>&1 || rc=$?
+  assert_rc 1 "$rc" "откатывать нечего — это ошибка, а не тишина"
+}
+
+test_gpu_passthrough_profile_is_real() {
+  cat >"${T}/m.json" <<'EOF'
+{ "guests": [ { "id": 201, "name": "d", "profile": "desktop", "graphics": "passthrough" } ] }
+EOF
+  config_load "${T}/m.json"
+  assert_eq "$(guest_profile_name 0)" "desktop-vm-gpu" "passthrough больше не заглушка"
+  profile_load desktop-vm-gpu || fail "профиль не читается"
+  assert_eq "$(prof_get vm.bios)" "ovmf" "для проброса нужен UEFI"
+  prof_bool vm.efidisk || fail "UEFI без EFI-диска не загрузится"
+  [[ -z "$(prof_get vm.vga "")" ]] || fail "встроенный VGA должен остаться по умолчанию"
 }
 
 # --- Командная строка --------------------------------------------------------
@@ -1002,6 +1219,19 @@ it "config-backup: собирает архив"              test_cfgbackup_crea
 it "config-backup: свежая копия — работы нет"   test_cfgbackup_fresh_copy_is_enough
 it "config-backup: устаревшая копия обновляется" test_cfgbackup_stale_copy_triggers_new_one
 it "config-backup: прореживает старые"          test_cfgbackup_prunes_old_copies
+
+printf '\nПроброс видеокарты\n'
+it "gpu: правило нуля"                          test_gpu_zero_rule
+it "gpu: определяет единственную видеокарту"    test_gpu_resolves_single_card
+it "gpu: отказ без IOMMU"                       test_gpu_refuses_without_iommu
+it "gpu: отказ при общей IOMMU-группе"          test_gpu_refuses_on_shared_group
+it "gpu: пишет параметры, модули, привязку"     test_gpu_apply_writes_everything
+it "gpu: повторный запуск ничего не делает"     test_gpu_apply_is_idempotent
+it "gpu: без подтверждения не трогает хост"     test_gpu_refuses_without_confirmation
+it "gpu: записывает, что именно изменил"        test_gpu_state_records_changes
+it "gpu: откат возвращает файлы как были"       test_gpu_revert_restores_files
+it "gpu: откат без записи — честная ошибка"     test_gpu_revert_without_state_says_so
+it "gpu: профиль passthrough настоящий"         test_gpu_passthrough_profile_is_real
 
 printf '\nКомандная строка\n'
 it "modules: порядок по числовому префиксу"      test_modules_run_in_numeric_order
