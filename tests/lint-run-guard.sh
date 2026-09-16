@@ -6,11 +6,20 @@
 #
 # Переносы строк склеиваются: аргументы run(), вынесенные на следующую
 # строку, — это часть вызова run(), а не отдельная команда.
+#
+# Смотрим и в modules/, и в lib/: модули тонкие, а работа живёт в библиотеках,
+# и именно там правило легче всего обойти незаметно. Исключение — lib/core.sh:
+# там сами ворота. Отдельные честные строки помечаются комментарием
+# «keel:allow-direct <причина>».
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 # Команды, которые меняют систему и потому не могут вызываться напрямую
+# Те же команды в читающих подкомандах систему не меняют: doctor и проверки
+# модулей обязаны спрашивать хост напрямую, иначе им нечего показывать.
+READONLY='pvesm (status|list|path)|pvesh get|qm (list|config|status|showcmd)|pct (list|config|status|help)|pveam (list|available)|proxmox-boot-tool status|zpool (list|status)|zfs (list|get)|apt list|apt-cache|dpkg -[ls]|dpkg-query|systemctl (is-active|is-enabled|show|list-unit-files)'
+
 FORBIDDEN='apt-get|apt|aptitude|dpkg|qm|pct|pvesm|pveam|pveum|pvecm|pvesh|systemctl|service|rm|mv|cp|mkdir|rmdir|chmod|chown|ln|dd|mkfs|mount|umount|tee|useradd|usermod|zfs|zpool|lvcreate|lvremove|vgcreate|update-grub|proxmox-boot-tool|modprobe|sysctl|curl|wget'
 
 fail=0
@@ -19,11 +28,17 @@ check_statement() {
   local file=$1 lineno=$2 stmt=$3
   [[ -z "$stmt" || "$stmt" == \#* ]] && return 0
 
+  # Осознанное исключение: работа с собственными временными файлами и
+  # каталогом состояния keel. Пометка обязана называть причину — так каждое
+  # исключение видно глазами при чтении кода.
+  [[ "$stmt" == *"keel:allow-direct"* ]] && return 0
+
   # Команда может прятаться после &&, ||, ; или | — проверяем каждый кусок
   local segment
   while IFS= read -r segment; do
     segment=${segment#"${segment%%[![:space:]]*}"}
     [[ -n "$segment" ]] || continue
+    if [[ "$segment" =~ ^(${READONLY})([[:space:]]|$) ]]; then continue; fi
     if [[ "$segment" =~ ^(${FORBIDDEN})[[:space:]] ]]; then
       printf '%s:%d: прямой вызов изменяющей команды — нужно через run(): %s\n' \
         "$file" "$lineno" "$segment" >&2
@@ -58,10 +73,10 @@ while IFS= read -r file; do
     check_statement "$file" "$stmt_line" "$stmt"
     stmt=""
   done < "$file"
-done < <(find modules -type f -name '*.sh' 2>/dev/null)
+done < <(find modules lib -type f -name '*.sh' 2>/dev/null | grep -v '^lib/core\.sh$' | sort)
 
 if (( fail )); then
   printf '\nПравило нарушено: изменения системы идут только через run()/run_write().\n' >&2
   exit 1
 fi
-printf 'run-guard: модули не меняют систему в обход run() — порядок.\n'
+printf 'run-guard: модули и библиотеки не меняют систему в обход run() — порядок.\n'

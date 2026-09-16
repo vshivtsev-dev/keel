@@ -10,7 +10,8 @@
 #   ]
 #
 # Что делает:
-#   · у существующего хранилища приводит список content к описанному
+#   · у существующего хранилища ДОБАВЛЯЕТ описанные типы content к тем,
+#     что уже есть — не затирая набор целиком
 #   · создаёт отсутствующее хранилище, но только типа dir — создавать
 #     LVM или ZFS автоматически слишком опасно, это отдельное решение
 #
@@ -21,9 +22,10 @@ mod_title() { printf 'Хранилища'; }
 
 mod_describe() {
   cat <<'EOF'
-Приводит список типов содержимого (content) у хранилищ к описанному в
-манифесте и создаёт отсутствующие хранилища типа dir. Ничего не удаляет.
-Хранилища, которых нет в манифесте, не трогает.
+Добавляет хранилищам типы содержимого (content), описанные в манифесте, и
+создаёт отсутствующие хранилища типа dir. Типы, которых нет в манифесте, но
+есть на хосте, остаются на месте: ничего не удаляется. Хранилища, которых нет
+в манифесте, не трогает.
 EOF
 }
 
@@ -38,6 +40,24 @@ _storages_want_content() {
   done
   (( ${#out[@]} )) || return 0
   printf '%s' "$(printf '%s\n' "${out[@]}" | sort | paste -sd, -)"
+}
+
+# Типы из want, которых ещё нет у хранилища. Пусто — добавлять нечего.
+_storages_missing_content() {
+  local want=$1 have=$2 t out=()
+  while IFS= read -r t; do
+    [[ -n "$t" ]] || continue
+    [[ ",${have}," == *",${t},"* ]] || out+=("$t")
+  done < <(printf '%s\n' "${want//,/$'\n'}")
+  (( ${#out[@]} )) || return 0
+  printf '%s' "$(IFS=,; printf '%s' "${out[*]}")"
+}
+
+# Что должно получиться: то, что было, плюс то, что описано
+_storages_union_content() {
+  local want=$1 have=$2
+  printf '%s\n%s\n' "${want//,/$'\n'}" "${have//,/$'\n'}" \
+    | sed '/^[[:space:]]*$/d' | sort -u | paste -sd, -
 }
 
 _storages_have_content() {
@@ -72,8 +92,10 @@ mod_check() {
     fi
 
     have=$(_storages_have_content "$name")
-    if [[ -n "$want" && "$want" != "$have" ]]; then
-      printf 'у хранилища %s content: %s → %s\n' "$name" "${have:-—}" "$want"
+    local missing; missing=$(_storages_missing_content "$want" "$have")
+    if [[ -n "$want" && -n "$missing" ]]; then
+      printf 'у хранилища %s добавить content: %s (было: %s)\n' \
+        "$name" "$missing" "${have:-—}"
       changes=1
     fi
   done
@@ -108,9 +130,12 @@ mod_apply() {
     fi
 
     have=$(_storages_have_content "$name")
-    if [[ -n "$want" && "$want" != "$have" ]]; then
-      run "Изменить content у ${name}: ${have:-—} → ${want}" \
-        pvesm set "$name" --content "$want" || return $?
+    local missing merged
+    missing=$(_storages_missing_content "$want" "$have")
+    if [[ -n "$want" && -n "$missing" ]]; then
+      merged=$(_storages_union_content "$want" "$have")
+      run "Добавить content у ${name}: ${missing} (станет ${merged})" \
+        pvesm set "$name" --content "$merged" || return $?
     fi
   done
   return 0
@@ -130,8 +155,9 @@ mod_verify() {
       continue
     fi
     have=$(_storages_have_content "$name")
-    if [[ -n "$want" && "$want" != "$have" ]]; then
-      printf '%s: content %s, ожидалось %s\n' "$name" "${have:-—}" "$want"
+    local missing; missing=$(_storages_missing_content "$want" "$have")
+    if [[ -n "$want" && -n "$missing" ]]; then
+      printf '%s: нет типов content: %s (есть: %s)\n' "$name" "$missing" "${have:-—}"
       rc=$KEEL_RC_CHANGES
     else
       printf '%s: в порядке\n' "$name"

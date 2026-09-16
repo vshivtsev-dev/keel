@@ -70,7 +70,7 @@ github_latest_tag() {
   local repo=$1
   command -v curl >/dev/null 2>&1 || return 0
   curl -fsSL --max-time 15 "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
-    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1   # keel:allow-direct чтение версии, ничего не качает
 }
 
 # Версия образа: либо явная, либо последний релиз, либо запасная из профиля
@@ -176,6 +176,13 @@ guest_password() {
     return 0
   fi
 
+  # Просмотр плана не создаёт ничего, включая пароль: показываем намерение
+  if [[ "$KEEL_MODE" == "dry" ]]; then
+    info "Пароль для ${name} будет создан при применении и сохранён в ${secret_file}"
+    KEEL_GUEST_SECRET="ПАРОЛЬ-СОЗДАСТСЯ-ПРИ-ПРИМЕНЕНИИ"
+    return 0
+  fi
+
   local pw=""
   if [[ "$KEEL_MODE" == "step" ]]; then
     pw=$(ui_password "Пароль для ${name}" \
@@ -185,9 +192,9 @@ guest_password() {
 
   if [[ -z "$pw" ]]; then
     pw=$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | head -c 16)
-    mkdir -p "$(dirname "$secret_file")"
+    mkdir -p "$(dirname "$secret_file")"   # keel:allow-direct каталог самого keel
     printf '%s\n' "$pw" >"$secret_file"
-    chmod 600 "$secret_file"
+    chmod 600 "$secret_file"               # keel:allow-direct файл самого keel
     warn "Сгенерирован пароль для ${name}, сохранён в ${secret_file}"
   fi
   KEEL_GUEST_SECRET=$pw
@@ -433,7 +440,9 @@ _lxc_post_install_script() {
   n=$(config_len "guests.${i}.packages")
   for (( j = 0; j < n; j++ )); do pkgs+=("$(config_get "guests.${i}.packages.${j}")"); done
   if (( ${#pkgs[@]} )); then
-    printf 'apt-get install -y --no-install-recommends %s\n' "${pkgs[*]}"
+    # IFS задаётся явно: список пакетов должен склеиться пробелами, а не тем,
+    # что окажется в IFS у вызывающего
+    printf 'apt-get install -y --no-install-recommends %s\n' "$(IFS=' '; printf '%s' "${pkgs[*]}")"
   fi
 
   printf 'id -u %s >/dev/null 2>&1 || adduser --disabled-password --gecos "" %s\n' "$user" "$user"
@@ -467,7 +476,7 @@ DRI
 lxc_post_install() {
   local i=$1 id=$2 user=$3 password=$4
   local script preview
-  script=$(mktemp); chmod 600 "$script"
+  script=$(mktemp); chmod 600 "$script"   # keel:allow-direct временный файл keel
   _lxc_post_install_script "$i" "$user" "$password" \
     | sed "s/KEEL_USER/${user}/g" >"$script"
 
@@ -482,7 +491,7 @@ lxc_post_install() {
     run "Выполнить первичную настройку внутри контейнера" \
       pct exec "$id" -- bash /root/keel-post-install.sh || rc=$?
   fi
-  rm -f "$script"
+  rm -f "$script"   # keel:allow-direct временный файл keel
   return "$rc"
 }
 

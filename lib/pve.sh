@@ -115,7 +115,11 @@ dri_nodes() {
   local dir; dir=$(fsroot /dev/dri)
   compgen -G "${dir}/*" >/dev/null 2>&1 || return 0
   local n
-  for n in "${dir}"/*; do printf '%s\n' "$n"; done
+  # by-path и by-id — каталоги со ссылками, устройствами они не являются
+  for n in "${dir}"/*; do
+    [[ -d "$n" ]] && continue
+    printf '%s\n' "$n"
+  done
 }
 
 # Библиотеки, без которых не заработает 3D-ускорение в ВМ (virtio-gl)
@@ -135,6 +139,25 @@ pve_storages() {
 }
 
 # Существует ли гость с таким ID (ВМ или контейнер) — понадобится в Фазе 2
+# Все гости на хосте: id, тип и имя. Читаем конфиги, а не qm/pct, — это
+# работает и под fsroot в тестах, и на хосте без запущенных сервисов.
+guest_list() {
+  local d f id name
+  for d in "$(fsroot /etc/pve/qemu-server)" "$(fsroot /etc/pve/lxc)"; do
+    compgen -G "${d}/*.conf" >/dev/null 2>&1 || continue
+    for f in "${d}"/*.conf; do
+      id=$(basename "$f" .conf)
+      if [[ "$d" == */qemu-server ]]; then
+        name=$(sed -n 's/^name:[[:space:]]*//p' "$f" | head -n1)
+        printf '%s\tВМ\t%s\n' "$id" "${name:-—}"
+      else
+        name=$(sed -n 's/^hostname:[[:space:]]*//p' "$f" | head -n1)
+        printf '%s\tконтейнер\t%s\n' "$id" "${name:-—}"
+      fi
+    done
+  done
+}
+
 guest_exists() {
   local id=$1
   [[ -f "$(fsroot "/etc/pve/qemu-server/${id}.conf")" \
@@ -155,6 +178,14 @@ apt_upgradable_count() {
 apt_upgradable_list() {
   command -v apt-get >/dev/null 2>&1 || return 0
   LC_ALL=C apt-get -s dist-upgrade 2>/dev/null | sed -n 's/^Inst \([^ ]*\) .*/\1/p'
+}
+
+# Читает ли apt свои списки источников. Пусто — читает; иначе его же строки
+# ошибок. Нужна потому, что при битых источниках apt-get -s ничего не печатает,
+# и «ноль обновлений» неотличим от «обновлять нечего».
+apt_sources_error() {
+  command -v apt-get >/dev/null 2>&1 || return 0
+  LC_ALL=C apt-get -s dist-upgrade 2>&1 >/dev/null | grep '^E:' || true
 }
 
 # --- Хранилища ---------------------------------------------------------------
@@ -295,7 +326,7 @@ host_config_staging_dir() {
   local dir; dir=$(mktemp -d)
   host_config_report >"${dir}/host-report.txt" 2>/dev/null || true
   if [[ -n "${KEEL_MANIFEST:-}" && -f "$KEEL_MANIFEST" ]]; then
-    cp "$KEEL_MANIFEST" "${dir}/manifest.json"
+    cp "$KEEL_MANIFEST" "${dir}/manifest.json"   # keel:allow-direct сборка архива во временном каталоге
   fi
   printf 'keel %s, снято %s\n' "${KEEL_VERSION:-?}" "$(date '+%Y-%m-%d %H:%M:%S')" \
     >"${dir}/keel-version.txt"

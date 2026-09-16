@@ -10,7 +10,6 @@
 # Полная справка: keel help
 
 set -Eeuo pipefail
-IFS=$'\n\t'
 
 KEEL_VERSION="0.1.0"
 

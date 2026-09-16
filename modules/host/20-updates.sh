@@ -20,8 +20,21 @@ mod_describe() {
 EOF
 }
 
+# Битые списки источников apt не печатает как «ошибку обновления»: он просто
+# не печатает ничего, и ноль обновлений становится неотличим от «всё свежее».
+# Поэтому спрашиваем отдельно и до всего остального.
+_updates_apt_blocked() {
+  local e; e=$(apt_sources_error)
+  [[ -n "$e" ]] || return 1
+  err "apt не может прочитать списки источников:"
+  printf '%s\n' "$e" | sed 's/^/  /'
+  err "Сначала почини репозитории: keel apply --only host/10-repos"
+  return 0
+}
+
 mod_check() {
   config_bool host.updates false || return "$KEEL_RC_SKIP"
+  _updates_apt_blocked && return 1
 
   local n; n=$(apt_upgradable_count)
   if (( n == 0 )); then
@@ -36,6 +49,7 @@ mod_check() {
 
 mod_apply() {
   config_bool host.updates false || return "$KEEL_RC_SKIP"
+  _updates_apt_blocked && return 1
 
   run "Обновить список пакетов" apt-get update || return $?
   run "Установить обновления" \
@@ -50,6 +64,7 @@ mod_apply() {
 
 mod_verify() {
   config_bool host.updates false || return "$KEEL_RC_SKIP"
+  _updates_apt_blocked && return 1
   local n; n=$(apt_upgradable_count)
   if (( n == 0 )); then
     printf 'все пакеты обновлены\n'

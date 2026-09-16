@@ -145,10 +145,10 @@ config_load() {
   done < <(printf '%s' "$src" | _config_perl_flatten 2>"$errfile")
 
   if [[ -s "$errfile" ]]; then
-    local msg; msg=$(cat "$errfile"); rm -f "$errfile"
+    local msg; msg=$(cat "$errfile"); rm -f "$errfile"   # keel:allow-direct временный файл keel
     die "Манифест ${path} не читается: ${msg}"
   fi
-  rm -f "$errfile"
+  rm -f "$errfile"   # keel:allow-direct временный файл keel
 
   KEEL_CFG_LOADED=1
   KEEL_MANIFEST=$path
@@ -271,11 +271,11 @@ profile_load() {
   done < <(printf '%s' "$src" | _config_perl_flatten 2>"$errfile")
 
   if [[ -s "$errfile" ]]; then
-    local msg; msg=$(cat "$errfile"); rm -f "$errfile"
+    local msg; msg=$(cat "$errfile"); rm -f "$errfile"   # keel:allow-direct временный файл keel
     err "Профиль ${path} не читается: ${msg}"
     return 1
   fi
-  rm -f "$errfile"
+  rm -f "$errfile"   # keel:allow-direct временный файл keel
   KEEL_PROF_NAME=$name
   return 0
 }

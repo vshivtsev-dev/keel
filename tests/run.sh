@@ -899,7 +899,7 @@ test_modules_run_in_numeric_order() {
 
 # --- Проброс видеокарты (вариант C) ------------------------------------------
 
-# Хост с одной видеокартой в своей IOMMU-группе — как на живом ga8
+# Хост с одной видеокартой в своей IOMMU-группе — как на живом железе
 _fake_gpu_host() {
   export KEEL_FS_ROOT="${T}/root"
   mkdir -p "${KEEL_FS_ROOT}/etc/default" "${KEEL_FS_ROOT}/etc/modprobe.d" \
@@ -1147,6 +1147,154 @@ test_cli_apply_refuses_on_non_proxmox() {
   assert_contains "$out" "KEEL_ALLOW_NON_PVE"
 }
 
+
+# --- Разбор первого живого прогона ------------------------------------------
+#
+# Каждый тест ниже падал на коде, который поехал на хост, и сторожит место,
+# где keel уже один раз ошибся.
+
+# Выключенный .sources обязан остаться валидным для apt: пустая строка внутри
+# файла начинает новую запись, а запись без Types делает файл битым целиком —
+# и apt перестаёт читать вообще все источники.
+test_repos_disabled_file_stays_valid_for_apt() {
+  _fake_host_deb822
+  _manifest_repos "no-subscription"
+  export KEEL_MODE="yes"
+  ( source "${KEEL_ROOT}/modules/host/10-repos.sh"; mod_apply ) >/dev/null 2>&1 \
+    || fail "применение не удалось"
+
+  local f="${KEEL_FS_ROOT}/etc/apt/sources.list.d/pve-enterprise.sources"
+  if grep -q '^[[:space:]]*$' "$f"; then
+    fail "пустая строка разрывает запись — apt сочтёт файл битым:
+$(cat "$f")"
+  fi
+  assert_contains "$(cat "$f")" "Types: deb"
+  assert_contains "$(cat "$f")" "Enabled: false"
+}
+
+# Файл, сломанный прошлой версией keel, должен опознаваться как невыключенный
+# и чиниться при следующем применении — руками на хосте ничего не правим.
+test_repos_repairs_file_broken_by_older_keel() {
+  _fake_host_deb822
+  local f="${KEEL_FS_ROOT}/etc/apt/sources.list.d/pve-enterprise.sources"
+  printf '\n# Выключено keel\nEnabled: false\n' >>"$f"
+  _manifest_repos "no-subscription"
+
+  local rc=0
+  ( source "${KEEL_ROOT}/modules/host/10-repos.sh"; mod_check ) >/dev/null 2>&1 || rc=$?
+  assert_rc 10 "$rc" "битый файл нельзя считать выключенным"
+
+  export KEEL_MODE="yes"
+  ( source "${KEEL_ROOT}/modules/host/10-repos.sh"; mod_apply ) >/dev/null 2>&1 \
+    || fail "починка не удалась"
+  if grep -q '^[[:space:]]*$' "$f"; then
+    fail "починка не убрала пустую строку:
+$(cat "$f")"
+  fi
+  assert_eq "$(grep -c 'Enabled: false' "$f")" "1" "выключатель должен остаться один"
+
+  rc=0
+  ( source "${KEEL_ROOT}/modules/host/10-repos.sh"; mod_check ) >/dev/null 2>&1 || rc=$?
+  assert_rc 0 "$rc" "после починки работы быть не должно"
+}
+
+# Когда apt не может прочитать источники, он молчит в stdout — и ноль строк
+# «Inst» означал «всё обновлено». Теперь это ошибка, а не зелёная галочка.
+test_updates_refuses_when_apt_is_broken() {
+  stub_commands apt-get
+  cat >"${T}/bin/apt-get" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "apt-get $*" >> "$KEEL_STUB_LOG"
+printf 'E: Malformed stanza 2 in source list /etc/apt/sources.list.d/ceph.sources (type)\n' >&2
+printf 'E: The list of sources could not be read.\n' >&2
+exit 100
+STUB
+  chmod +x "${T}/bin/apt-get"
+
+  printf '{ "host": { "updates": true } }' >"${T}/m.json"
+  config_load "${T}/m.json"
+
+  assert_eq "$(mod_rc host/20-updates check)" "1" "битые источники — ошибка, а не «обновлять нечего»"
+  assert_contains "$(mod_out host/20-updates check)" "не может прочитать списки источников"
+  assert_eq "$(mod_rc host/20-updates apply)" "1" "применение обязано отказаться"
+  assert_not_ran "apt-get -y dist-upgrade"
+}
+
+# IFS=$'\n\t' в bin/keel склеивал "${массив[*]}" переводами строк, и список
+# пакетов рассыпался по строкам: под set -e вторая строка убивала настройку
+# контейнера. Стенд этого не замечал, потому что сам bin/keel не запускает, —
+# поэтому здесь IFS портится нарочно.
+test_lxc_install_line_keeps_packages_together() {
+  local IFS=$'\n\t'
+  _fake_guest_host
+  printf '{ "guests": [ { "id": 102, "name": "d", "profile": "desktop", "graphics": "dri", "cloudinit": { "user": "alex" }, "packages": ["mc"] } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+  local out; out=$(mod_out guests/50-guests apply)
+
+  local line; line=$(printf '%s\n' "$out" | grep -m1 'apt-get install')
+  [[ -n "$line" ]] || fail "в сценарии нет установки пакетов:
+${out}"
+  assert_contains "$line" "xfce4"
+  assert_contains "$line" "mc" "пакет из манифеста должен попасть в ту же строку"
+  # Голое имя пакета отдельной строкой — это команда, которой нет
+  if printf '%s\n' "$out" | grep -qx '[[:space:]]*xfce4-goodies'; then
+    fail "пакеты разъехались по строкам — сценарий не выполнится:
+${out}"
+  fi
+}
+
+# Просмотр плана не создаёт ничего, включая файл с паролем.
+test_dry_run_creates_no_secret_file() {
+  _fake_guest_host
+  printf '{ "guests": [ { "id": 102, "name": "d", "profile": "desktop", "graphics": "dri", "cloudinit": { "user": "alex" } } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="dry"
+  mod_out guests/50-guests apply >/dev/null
+
+  local secret_file="${KEEL_STATE_DIR}/secrets/102.txt"
+  if [[ -e "$secret_file" ]]; then
+    fail "просмотр плана создал ${secret_file} — он обязан ничего не менять"
+  fi
+  assert_not_ran "pct create"
+}
+
+# «Ничего не удаляет» в шапке модуля должно быть правдой: типы content,
+# которых нет в манифесте, но есть на хосте, обязаны уцелеть.
+test_storage_keeps_content_types_it_did_not_add() {
+  _fake_storage_cfg
+  # На живом хосте у local был ещё и import — панель импорта дисков
+  sed -i 's/content iso,vztmpl,backup/content iso,vztmpl,backup,import/' \
+    "${KEEL_FS_ROOT}/etc/pve/storage.cfg"
+  stub_commands pvesm
+  printf '{ "storages": [ { "name": "local", "content": ["iso","vztmpl","backup","snippets"] } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+
+  assert_eq "$(mod_rc host/30-storage check)" "10" "snippets не хватает"
+  export KEEL_MODE="yes"
+  mod_rc host/30-storage apply >/dev/null
+  assert_ran "pvesm set local --content backup,import,iso,snippets,vztmpl"
+
+  # И наоборот: лишний тип на хосте не повод считать, что есть работа
+  printf '{ "storages": [ { "name": "local", "content": ["iso"] } ] }' >"${T}/m2.json"
+  config_load "${T}/m2.json"
+  assert_eq "$(mod_rc host/30-storage check)" "0" "лишний тип на хосте — не расхождение"
+}
+
+
+# Глобальный IFS — общий корень четырёх поломок сразу: он ломает "${массив[*]}"
+# и словоделение по пробелам, от списка пакетов до выбора модулей в меню.
+# Кавычки в проекте расставлены, отдельный IFS не нужен ни одной строке.
+test_no_global_ifs() {
+  local hits
+  hits=$(grep -rn '^[[:space:]]*IFS=' bin/ lib/ modules/ 2>/dev/null \
+         | grep -v 'local IFS=' || true)
+  if [[ -n "$hits" ]]; then
+    fail "глобальный IFS меняет разбор во всём проекте — задавай его рядом с местом использования:
+${hits}"
+  fi
+}
+
 # --- Запуск ------------------------------------------------------------------
 
 printf '\nОкружение\n'
@@ -1183,17 +1331,21 @@ it "repos: применение и идемпотентность"        test_r
 it "repos: старый формат .list"                 test_repos_old_list_format
 it "repos: отвергает неизвестное значение"      test_repos_rejects_unknown_value
 it "repos: не трогает настоящую систему"        test_repos_never_touches_real_root_in_tests
+it "repos: выключенный файл валиден для apt"    test_repos_disabled_file_stays_valid_for_apt
+it "repos: чинит файл, сломанный прошлой версией" test_repos_repairs_file_broken_by_older_keel
 
 printf '\nФаза 1: хост\n'
 it "updates: правило нуля"                      test_updates_zero_rule
 it "updates: обновлять нечего"                  test_updates_nothing_to_do
 it "updates: ставит dist-upgrade"               test_updates_applies_dist_upgrade
+it "updates: битые источники — ошибка"          test_updates_refuses_when_apt_is_broken
 it "storage: чтение storage.cfg"                test_storage_reads_config
 it "storage: доводит content до описанного"     test_storage_adds_missing_content
 it "storage: порядок в списке не важен"         test_storage_already_correct
 it "storage: создаёт dir-хранилище"             test_storage_creates_dir_storage
 it "storage: не выдумывает LVM"                 test_storage_refuses_to_invent_lvm
 it "storage: не трогает чужие хранилища"        test_storage_ignores_unlisted
+it "storage: не удаляет чужие типы content"     test_storage_keeps_content_types_it_did_not_add
 it "backup: правило нуля"                       test_backup_zero_rule
 it "backup: создаёт задание"                    test_backup_creates_job
 it "backup: обновляет своё задание"             test_backup_updates_existing_job
@@ -1212,6 +1364,8 @@ it "guests: без snippets честно отказывается"   test_guests
 it "guests: команды создания LXC с /dev/dri"    test_guests_lxc_desktop_commands
 it "guests: пароль не утекает в лог и на экран" test_guests_lxc_password_never_in_log
 it "guests: права на /dev/dri чинятся сами"     test_guests_lxc_fixes_dri_permissions_itself
+it "guests: пакеты одной строкой"               test_lxc_install_line_keeps_packages_together
+it "guests: просмотр не создаёт файл с паролем" test_dry_run_creates_no_secret_file
 
 printf '\nФаза 3: копия конфигурации хоста\n'
 it "config-backup: правило нуля"                test_cfgbackup_zero_rule
@@ -1242,6 +1396,7 @@ it "cli: говорит, когда пароля нет"             test_cli_pa
 it "cli: apply отказывается вне Proxmox"        test_cli_apply_refuses_on_non_proxmox
 
 printf '\nСтатические проверки\n'
+it "статика: глобального IFS нет"               test_no_global_ifs
 if ./tests/lint-run-guard.sh >/dev/null 2>&1; then
   printf '  ✓ run-guard: изменения только через run()\n'; PASSED=$(( PASSED + 1 ))
 else

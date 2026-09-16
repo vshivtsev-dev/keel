@@ -11,7 +11,7 @@ state_init() {
     KEEL_STATE_DIR="${TMPDIR:-/tmp}/keel-state"
     # shellcheck disable=SC2034  # используется в lib/core.sh (keel_backup_file)
     KEEL_BACKUP_DIR="${KEEL_STATE_DIR}/backups"
-    mkdir -p "$KEEL_STATE_DIR"
+    mkdir -p "$KEEL_STATE_DIR"   # keel:allow-direct каталог состояния самого keel
   fi
   KEEL_JOURNAL="${KEEL_STATE_DIR}/journal.tsv"
   [[ -f "$KEEL_JOURNAL" ]] || printf 'дата\tмодуль\tдействие\tисход\n' >"$KEEL_JOURNAL"
@@ -27,5 +27,9 @@ state_record() {
 state_tail() {
   local n=${1:-15}
   [[ -f "${KEEL_JOURNAL:-}" ]] || { printf 'Журнал пуст.\n'; return 0; }
-  tail -n "$n" "$KEEL_JOURNAL"
+  # В файле всегда есть строка заголовка — одна она означает пустой журнал
+  local rows; rows=$(tail -n +2 "$KEEL_JOURNAL")
+  [[ -n "$rows" ]] || { printf 'Журнал пуст.\n'; return 0; }
+  head -n1 "$KEEL_JOURNAL"
+  printf '%s\n' "$rows" | tail -n "$n"
 }

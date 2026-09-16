@@ -66,6 +66,14 @@ doctor_host() {
   _doc_row "Загрузчик"     "$(pve_bootloader)"
   _doc_row "Формат репозиториев" "$(pve_repo_style)"
 
+  local apt_err; apt_err=$(apt_sources_error)
+  if [[ -z "$apt_err" ]]; then
+    _doc_ok "apt" "списки источников читаются"
+  else
+    _doc_bad "apt" "списки источников не читаются — обновления работать не будут"
+    printf '%s\n' "$apt_err" | sed 's/^/      /'
+  fi
+
   local bridges; bridges=$(pve_bridges | paste -sd' ' -)
   _doc_row "Сетевые мосты" "${bridges:-—}"
 
@@ -73,6 +81,20 @@ doctor_host() {
   if [[ -n "$storages" ]]; then
     _doc_section "Хранилища"
     printf '%s\n' "$storages" | sed 's/^/  /'
+  fi
+
+  # Занятые номера видно сразу — по ним и выбирается свободная сотня в манифесте
+  local guests; guests=$(guest_list)
+  _doc_section "Гости на хосте"
+  if [[ -n "$guests" ]]; then
+    local id kind name
+    while IFS=$'\t' read -r id kind name; do
+      [[ -n "$id" ]] || continue
+      _doc_row "  ${id}" "${kind}, ${name}"
+    done <<< "$guests"
+    _doc_row "" "keel трогает только тех, кто описан в манифесте"
+  else
+    _doc_row "" "нет"
   fi
 }
 
@@ -127,7 +149,7 @@ doctor_graphics() {
   if host_has_egl; then
     _doc_ok "Вариант B (ВМ + virtio-gl)" "libEGL на месте"
   else
-    _doc_warn "Вариант B (ВМ + virtio-gl)" "нет libEGL — 3D в ВМ не заработает"
+    _doc_warn "Вариант B (ВМ + virtio-gl)" "нет libEGL — 3D в ВМ не заработает (пакет libegl1)"
   fi
 
   local vgid rgid

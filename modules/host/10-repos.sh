@@ -102,11 +102,68 @@ _repos_other_files() {
   return 0
 }
 
+# --- Выключение репозитория в формате deb822 ----------------------------------
+#
+# Записи в .sources разделяются пустой строкой, и у каждой обязано быть поле
+# Types. Дописать «Enabled: false» в конец файла через пустую строку — значит
+# создать вторую запись без Types; apt считает такой файл битым и отказывается
+# читать вообще все источники. Поэтому поле кладётся внутрь записи.
+
+# Файл, приведённый к виду «выключено»: служебные строки keel и любые Enabled
+# убираются, опустевшие записи исчезают, а в конец каждой настоящей записи
+# дописывается выключатель. Повторный прогон по своему же результату ничего
+# не меняет.
+_repos_deb822_disable() {
+  awk '
+    function flush(   i, has_types) {
+      if (n == 0) return
+      has_types = 0
+      for (i = 1; i <= n; i++) if (buf[i] ~ /^[[:space:]]*[Tt]ypes:/) has_types = 1
+      if (!first) print ""
+      first = 0
+      for (i = 1; i <= n; i++) print buf[i]
+      if (has_types) { print "# Выключено keel"; print "Enabled: false" }
+      n = 0
+    }
+    BEGIN { n = 0; first = 1 }
+    /^[[:space:]]*$/                            { flush(); next }
+    /^[[:space:]]*#[[:space:]]*Выключено keel[[:space:]]*$/ { next }
+    /^[[:space:]]*[Ee]nabled:/                  { next }
+    { buf[++n] = $0 }
+    END { flush() }
+  ' "$1"
+}
+
+# Выключен ли файл .sources: записи есть, у каждой есть Types и выключатель.
+# Запись без Types — это наш старый брак, и он тоже считается «не выключено»,
+# чтобы применение его перезаписало.
+_repos_deb822_is_disabled() {
+  awk '
+    function close_stanza(   i, has_types, has_off, low) {
+      if (n == 0) return
+      has_types = 0; has_off = 0
+      for (i = 1; i <= n; i++) {
+        low = tolower(buf[i])
+        if (low ~ /^[[:space:]]*types:/) has_types = 1
+        if (low ~ /^[[:space:]]*enabled:[[:space:]]*(false|no|0)[[:space:]]*$/) has_off = 1
+      }
+      if (!has_types) bad = 1
+      else { stanzas++; if (!has_off) bad = 1 }
+      n = 0
+    }
+    BEGIN { n = 0; stanzas = 0; bad = 0 }
+    /^[[:space:]]*$/ { close_stanza(); next }
+    /^[[:space:]]*#/ { next }
+    { buf[++n] = $0 }
+    END { close_stanza(); exit (bad || stanzas == 0) ? 1 : 0 }
+  ' "$1" 2>/dev/null
+}
+
 # Уже выключён?
 _repos_is_disabled() {
   local f=$1
   if [[ "$f" == *.sources ]]; then
-    grep -qi '^Enabled:[[:space:]]*false' "$f" 2>/dev/null
+    _repos_deb822_is_disabled "$f"
   else
     ! grep -qE '^[[:space:]]*deb[[:space:]]' "$f" 2>/dev/null
   fi
@@ -116,12 +173,7 @@ _repos_is_disabled() {
 _repos_disabled_content() {
   local f=$1
   if [[ "$f" == *.sources ]]; then
-    if grep -qi '^Enabled:' "$f" 2>/dev/null; then
-      sed 's/^[Ee]nabled:.*/Enabled: false/' "$f"
-    else
-      cat "$f"
-      printf '\n# Выключено keel\nEnabled: false\n'
-    fi
+    _repos_deb822_disable "$f"
   else
     sed 's/^[[:space:]]*deb[[:space:]]/# Выключено keel: &/' "$f"
   fi

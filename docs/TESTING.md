@@ -224,9 +224,16 @@ keel apply --only host/10-repos
 
 ```bash
 cat /etc/apt/sources.list.d/pve-no-subscription.sources   # или .list на PVE 8
-grep -i enabled /etc/apt/sources.list.d/pve-enterprise.sources
-apt-get update     # должно пройти без 401
+cat /etc/apt/sources.list.d/pve-enterprise.sources       # смотри целиком, не только Enabled
+apt-get update     # должно пройти без 401 и без «Malformed stanza»
 ```
+
+В выключенном файле формата deb822 **не должно быть пустой строки** перед
+`Enabled: false`. Пустая строка начинает новую запись, у записи не оказывается
+поля `Types`, и apt объявляет битым весь файл — а вместе с ним перестаёт
+читать и все остальные источники. Первая версия keel делала именно так; если
+твой хост это застал, свежая версия чинит файл сама при следующем применении.
+
 
 Откат, если что-то не так:
 
@@ -235,8 +242,9 @@ ls /var/lib/keel/backups/
 cp /var/lib/keel/backups/<дата>/etc/apt/sources.list.d/* /etc/apt/sources.list.d/
 ```
 
-- [ ] `apt-get update` проходит без ошибки 401
+- [ ] `apt-get update` проходит без ошибки 401 и без `Malformed stanza`
 - [ ] enterprise-репозиторий помечен выключенным, но не удалён
+- [ ] в выключенном `.sources` нет пустых строк
 - [ ] `keel verify --only host/10-repos` подтверждает результат
 
 ---
@@ -281,7 +289,17 @@ grep -A5 'dir: local' /etc/pve/storage.cfg    # в content должны появ
 
 `snippets` обязательны — без них не создать ВМ из облачного образа.
 
+Модуль только **добавляет** типы content: то, что было у хранилища до keel,
+остаётся на месте. Если на хосте когда-то стояла версия keel, затиравшая
+набор целиком, сверься со списком — на PVE 9 у `local` по умолчанию есть ещё
+и `import` (панель импорта дисков и OVA). Вернуть:
+
+```bash
+pvesm set local --content backup,import,iso,snippets,vztmpl
+```
+
 - [ ] `snippets` появились в content хранилища `local`
+- [ ] прежние типы content никуда не делись
 - [ ] остальные хранилища не тронуты
 - [ ] `pvesm status` показывает всё как раньше
 

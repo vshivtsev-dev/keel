@@ -103,8 +103,30 @@ _backup_diff() {
   return 0
 }
 
+# Чужое задание «все гости» перекрывает наше: те же гости поедут в копию
+# дважды. Трогать его нельзя — чужое, — но и молчать об этом не стоит.
+_backup_warn_overlap() {
+  local jobs n i comment sched
+  jobs=$(backup_jobs_json)
+  n=$(json_len "$jobs" "")
+  for (( i = 0; i < n; i++ )); do
+    comment=$(json_get "$jobs" "${i}.comment" "")
+    [[ "$comment" == "$KEEL_BACKUP_TAG" ]] && continue
+    [[ "$(json_get "$jobs" "${i}.all" "0")" == "1" ]] || continue
+    [[ "$(json_get "$jobs" "${i}.enabled" "1")" == "1" ]] || continue
+    sched=$(json_get "$jobs" "${i}.schedule" "?")
+    warn "На хосте есть чужое задание «все гости» (${sched}). Гости из манифеста попадут в копию и по нему — дважды за период. keel это задание не трогает."
+  done
+  return 0
+}
+
 mod_check() {
   _backup_configured || return "$KEEL_RC_SKIP"
+
+  # Предупреждение имеет смысл только если наше задание адресное
+  if ! config_bool backup.all false && [[ -n "$(_backup_vmid_list)" ]]; then
+    _backup_warn_overlap
+  fi
 
   if [[ -z "$(config_get backup.storage local)" ]]; then
     err "backup.storage не может быть пустым"
