@@ -105,6 +105,7 @@ tests/          тесты на голом bash, без зависимостей
 
 Документация:
 
+- [docs/TESTING.md](docs/TESTING.md) — пошаговая обкатка на живом хосте
 - [docs/00-RECOVERY.md](docs/00-RECOVERY.md) — восстановление с нуля
 - [docs/MANIFEST.md](docs/MANIFEST.md) — справочник полей манифеста
 - [docs/MODULES.md](docs/MODULES.md) — как написать свой модуль
