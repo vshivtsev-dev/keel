@@ -15,10 +15,13 @@
 > проверку команд, которые keel отдаёт Proxmox), но на живом хосте ещё не
 > обкатана — см. [что проверено и что нет](docs/PLAN.md#проверено-и-не-проверено).
 
+Для работы нужен интернет: без него не скачать ни образы гостей, ни пакеты, а
+значит и восстанавливать нечего. Офлайнового режима у keel нет намеренно.
+
 ## Установка
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/vshivtsev-dev/proxmox/main/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/vshivtsev-dev/keel/main/install.sh)"
 ```
 
 Скрипт кладёт репозиторий в `/opt/keel` и делает доступной команду `keel`.

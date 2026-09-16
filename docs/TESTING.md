@@ -30,12 +30,12 @@ Proxmox, которая показывает результат сама.
 Проверяет: сам код, до всякого Proxmox. Можно прямо на ноутбуке.
 
 ```bash
-git clone -b claude/proxmox-host-setup-bina0f https://github.com/vshivtsev-dev/proxmox.git keel
+git clone https://github.com/vshivtsev-dev/keel.git
 cd keel
 ./tests/run.sh
 ```
 
-Ожидается: `Пройдено: 59, провалено: 0`.
+Ожидается: `Пройдено: 60, провалено: 0`.
 
 Если есть docker — то же самое в Debian 13, на котором стоит Proxmox VE 9:
 
@@ -53,66 +53,30 @@ cd keel
 
 ---
 
-## Шаг 1. Доставить keel на хост
+## Шаг 1. Установка на хост
 
-**Репозиторий закрытый**, а на свежем Proxmox нет git. Поэтому обычный
-`git clone` на хосте не сработает — ни из-за git, ни из-за доступа.
-Три пути, от простого к правильному.
-
-### Путь А: перенести с ноутбука (ничего настраивать не нужно)
-
-На машине, где репозиторий уже есть:
+Одна команда, под root:
 
 ```bash
-cd путь/к/keel
-git archive --format=tar.gz --prefix=keel/ -o /tmp/keel.tar.gz HEAD
-scp /tmp/keel.tar.gz root@адрес-хоста:/tmp/
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/vshivtsev-dev/keel/main/install.sh)"
 ```
 
-На хосте:
+Ни git, ни токенов, ни копирования файлов: установщик скачивает архив ветки
+`main` через curl и распаковывает в `/opt/keel`. Систему он при этом не
+настраивает — только кладёт код и делает команду `keel` доступной.
 
-```bash
-mkdir -p /opt/keel
-tar -xzf /tmp/keel.tar.gz -C /opt/keel --strip-components=1
-ln -sfn /opt/keel/bin/keel /usr/local/bin/keel
-cp /opt/keel/manifest/host.example.json /opt/keel/manifest/host.json
-```
+Обновление потом — повторный запуск той же команды. Твой
+`manifest/host.json` при этом не затирается: его нет в архиве.
 
-Работает всегда: ни git на хосте, ни доступа к GitHub с хоста не нужно.
-
-### Путь Б: токеном, прямо с хоста
-
-Создай токен: GitHub → Settings → Developer settings → Personal access
-tokens → Fine-grained, права `Contents: read` на этот репозиторий.
-
-```bash
-KEEL_TOKEN=ghp_твой_токен \
-KEEL_BRANCH=claude/proxmox-host-setup-bina0f \
-  bash /tmp/install.sh          # install.sh тоже придётся принести руками
-```
-
-### Путь В: открыть репозиторий (тогда всё станет как задумано)
-
-Settings → General → Danger Zone → Change visibility → Public. Секретов в
-репозитории нет: `manifest/host.json` с твоими адресами и путями к ключам
-в `.gitignore` и на GitHub не попадал. После этого заработает то, ради чего
-всё писалось — установка одной командой:
-
-```bash
-KEEL_BRANCH=claude/proxmox-host-setup-bina0f bash -c "$(curl -fsSL \
-  https://raw.githubusercontent.com/vshivtsev-dev/proxmox/refs/heads/claude/proxmox-host-setup-bina0f/install.sh)"
-```
-
-Решать тебе — это твой репозиторий, и открыть его я не могу при всём желании.
-
-### Независимая проверка (любой путь)
+Независимая проверка:
 
 ```bash
 keel version     # должно напечатать keel 0.1.0
 keel modules     # шесть модулей
 ```
 
-- [ ] keel на хосте, `keel version` работает
+- [ ] установка прошла одной командой
+- [ ] `keel version` работает
 - [ ] `keel modules` показывает шесть модулей
 
 ---

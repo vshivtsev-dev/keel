@@ -1019,6 +1019,13 @@ else
   FAILED=$(( FAILED + 1 )); FAILED_NAMES+=("run-guard")
 fi
 
+if ./tests/lint-no-secrets.sh >/dev/null 2>&1; then
+  printf '  ✓ no-secrets: личных данных в репозитории нет\n'; PASSED=$(( PASSED + 1 ))
+else
+  printf '  ✗ no-secrets\n'; ./tests/lint-no-secrets.sh 2>&1 | sed 's/^/      /'
+  FAILED=$(( FAILED + 1 )); FAILED_NAMES+=("no-secrets")
+fi
+
 if command -v shellcheck >/dev/null 2>&1; then
   if LC_ALL=C.UTF-8 shellcheck -x -S warning bin/keel lib/*.sh modules/*/*.sh tests/*.sh >/dev/null 2>&1; then
     printf '  ✓ shellcheck\n'; PASSED=$(( PASSED + 1 ))
