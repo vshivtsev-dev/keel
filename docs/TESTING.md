@@ -53,29 +53,66 @@ cd keel
 
 ---
 
-## Шаг 1. Установка на хост
+## Шаг 1. Доставить keel на хост
 
-Проверяет: установщик. Систему он не настраивает.
+**Репозиторий закрытый**, а на свежем Proxmox нет git. Поэтому обычный
+`git clone` на хосте не сработает — ни из-за git, ни из-за доступа.
+Три пути, от простого к правильному.
+
+### Путь А: перенести с ноутбука (ничего настраивать не нужно)
+
+На машине, где репозиторий уже есть:
 
 ```bash
-# на хосте Proxmox, под root
-git clone -b claude/proxmox-host-setup-bina0f \
-  https://github.com/vshivtsev-dev/proxmox.git /opt/keel
+cd путь/к/keel
+git archive --format=tar.gz --prefix=keel/ -o /tmp/keel.tar.gz HEAD
+scp /tmp/keel.tar.gz root@адрес-хоста:/tmp/
+```
+
+На хосте:
+
+```bash
+mkdir -p /opt/keel
+tar -xzf /tmp/keel.tar.gz -C /opt/keel --strip-components=1
 ln -sfn /opt/keel/bin/keel /usr/local/bin/keel
 cp /opt/keel/manifest/host.example.json /opt/keel/manifest/host.json
 ```
 
-Через `install.sh` пока не надо: он тянет ветку `main`, где этого кода ещё
-нет. Проверим его после слияния.
+Работает всегда: ни git на хосте, ни доступа к GitHub с хоста не нужно.
 
-Независимая проверка:
+### Путь Б: токеном, прямо с хоста
+
+Создай токен: GitHub → Settings → Developer settings → Personal access
+tokens → Fine-grained, права `Contents: read` на этот репозиторий.
+
+```bash
+KEEL_TOKEN=ghp_твой_токен \
+KEEL_BRANCH=claude/proxmox-host-setup-bina0f \
+  bash /tmp/install.sh          # install.sh тоже придётся принести руками
+```
+
+### Путь В: открыть репозиторий (тогда всё станет как задумано)
+
+Settings → General → Danger Zone → Change visibility → Public. Секретов в
+репозитории нет: `manifest/host.json` с твоими адресами и путями к ключам
+в `.gitignore` и на GitHub не попадал. После этого заработает то, ради чего
+всё писалось — установка одной командой:
+
+```bash
+KEEL_BRANCH=claude/proxmox-host-setup-bina0f bash -c "$(curl -fsSL \
+  https://raw.githubusercontent.com/vshivtsev-dev/proxmox/refs/heads/claude/proxmox-host-setup-bina0f/install.sh)"
+```
+
+Решать тебе — это твой репозиторий, и открыть его я не могу при всём желании.
+
+### Независимая проверка (любой путь)
 
 ```bash
 keel version     # должно напечатать keel 0.1.0
 keel modules     # шесть модулей
 ```
 
-- [ ] `keel version` работает
+- [ ] keel на хосте, `keel version` работает
 - [ ] `keel modules` показывает шесть модулей
 
 ---
