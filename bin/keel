@@ -11,7 +11,7 @@
 
 set -Eeuo pipefail
 
-KEEL_VERSION="0.1.0"
+KEEL_VERSION="0.2.0"
 
 # Каталог проекта: работает и при запуске из репозитория, и через симлинк
 _self=${BASH_SOURCE[0]}
@@ -42,7 +42,9 @@ source "${KEEL_ROOT}/lib/doctor.sh"
 # shellcheck source=../lib/external.sh
 source "${KEEL_ROOT}/lib/external.sh"
 
-KEEL_MANIFEST="${KEEL_MANIFEST:-${KEEL_ROOT}/manifest/host.json}"
+# Манифест лежит рядом с остальным твоим — в KEEL_HOME, а не среди кода:
+# обновление keel перезаписывает app/ целиком и до манифеста не дотягивается.
+KEEL_MANIFEST="${KEEL_MANIFEST:-${KEEL_HOME}/host.json}"
 KEEL_ONLY=""
 
 usage() {
@@ -62,6 +64,7 @@ keel — сборка и восстановление хоста Proxmox VE.
   backup      снять копию конфигурации хоста прямо сейчас
   gpu revert  откатить проброс видеокарты
   password ID показать пароль, сгенерированный для гостя
+  token [ИМЯ] показать сохранённый токен (по умолчанию cloudflared)
   external    внешние инструменты (community-scripts)
   modules     список модулей
   logs        показать последний лог
@@ -126,9 +129,18 @@ gpu_command() {
 # Пароли гостей в манифесте не хранятся — только здесь, и только для root
 show_password() {
   local id=$1
-  local file="${KEEL_STATE_DIR}/secrets/${id}.txt"
+  local file="${KEEL_SECRETS_DIR}/${id}.txt"
   [[ -n "$id" ]] || die "Укажи id гостя: keel password 102"
   [[ -f "$file" ]] || die "Для гостя ${id} пароль не сохранён (${file} нет)."
+  cat "$file"
+}
+
+# Токены внешних сервисов лежат там же, где пароли, и так же только для root
+show_token() {
+  local name=${1:-cloudflared}
+  local file="${KEEL_SECRETS_DIR}/${name}.txt"
+  [[ -f "$file" ]] || die "Токен «${name}» не сохранён (${file} нет).
+Положи его туда одной строкой или дай keel спросить при применении."
   cat "$file"
 }
 
@@ -213,6 +225,7 @@ main() {
     backup)   need_root; need_pve; modules_apply host/90-config-backup ;;
     gpu)      gpu_command "${KEEL_ARGV[1]:-}" ;;
     password) show_password "${KEEL_ARGV[1]:-}" ;;
+    token)    show_token "${KEEL_ARGV[1]:-}" ;;
     external) need_root; external_menu ;;
     modules)  modules_list_ids | column -t -s $'\t' 2>/dev/null || modules_list_ids ;;
     logs)     if [[ -f "$KEEL_LOG_FILE" ]]; then cat "$KEEL_LOG_FILE"; fi ;;

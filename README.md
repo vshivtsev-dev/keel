@@ -24,7 +24,9 @@
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/vshivtsev-dev/keel/main/install.sh)"
 ```
 
-Скрипт кладёт репозиторий в `/opt/keel` и делает доступной команду `keel`.
+Скрипт кладёт код в `/root/keel/app` и делает доступной команду `keel`. Всё,
+с чем работаешь ты, лежит рядом, в одном каталоге: манифест `/root/keel/host.json`,
+пароли в `secrets/`, копии правленых файлов в `backups/`, логи в `logs/`.
 Ничего в системе он при этом не настраивает.
 
 ## Как пользоваться
@@ -114,6 +116,7 @@ tests/          тесты на голом bash, без зависимостей
 - [docs/MANIFEST.md](docs/MANIFEST.md) — справочник полей манифеста
 - [docs/MODULES.md](docs/MODULES.md) — как написать свой модуль
 - [docs/30-desktop.md](docs/30-desktop.md) — рабочий стол и видеокарта
+- [docs/40-cloudflared.md](docs/40-cloudflared.md) — туннель Cloudflare наружу
 - [docs/PLAN.md](docs/PLAN.md) — архитектура и принятые решения
 - [docs/BACKLOG.md](docs/BACKLOG.md) — что не сделано и почему
 - [docs/90-troubleshooting.md](docs/90-troubleshooting.md) — если сломалось

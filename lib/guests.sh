@@ -169,7 +169,7 @@ guest_ssh_keys() {
 # спрашиваем, а в неинтерактивном режиме генерируем и сохраняем отдельно.
 guest_password() {
   local id=$1 name=$2
-  local secret_file="${KEEL_STATE_DIR}/secrets/${id}.txt"
+  local secret_file="${KEEL_SECRETS_DIR}/${id}.txt"
 
   if [[ -f "$secret_file" ]]; then
     KEEL_GUEST_SECRET=$(cat "$secret_file")
@@ -198,6 +198,52 @@ guest_password() {
     warn "Сгенерирован пароль для ${name}, сохранён в ${secret_file}"
   fi
   KEEL_GUEST_SECRET=$pw
+  return 0
+}
+
+# Токен для гостя, который подключается к внешнему сервису (сейчас — туннель
+# Cloudflare). В отличие от пароля, придумать его нельзя: он выдаётся панелью.
+# Поэтому без токена keel честно отказывается, а не делает вид, что справился.
+guest_token() {
+  local name=$1
+  local token_file
+  token_file="${KEEL_SECRETS_DIR}/$(prof_get token_file token).txt"
+
+  if [[ -f "$token_file" ]]; then
+    KEEL_GUEST_TOKEN=$(tr -d '[:space:]' <"$token_file")
+    if [[ -z "$KEEL_GUEST_TOKEN" ]]; then
+      err "Файл ${token_file} пуст — токена нет."
+      return 1
+    fi
+    return 0
+  fi
+
+  # Просмотр плана не спрашивает и не создаёт ничего
+  if [[ "$KEEL_MODE" == "dry" ]]; then
+    info "Токен для ${name} будет запрошен при применении и сохранён в ${token_file}"
+    KEEL_GUEST_TOKEN="ТОКЕН-СПРОСИМ-ПРИ-ПРИМЕНЕНИИ"
+    return 0
+  fi
+
+  local tok=""
+  if [[ "$KEEL_MODE" == "step" ]]; then
+    tok=$(ui_password "Токен для ${name}" "$(prof_get token_hint "Токен внешнего сервиса.
+Сохраню в ${token_file}, в манифест он не попадёт.")")
+    tok=$(printf '%s' "$tok" | tr -d '[:space:]')
+  fi
+
+  if [[ -z "$tok" ]]; then
+    err "Нет токена для ${name} — создать его сам keel не может."
+    note "Положи токен одной строкой в ${token_file} и повтори."
+    note "Или запусти без --yes: тогда keel спросит его прямо здесь."
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$token_file")"   # keel:allow-direct каталог самого keel
+  printf '%s\n' "$tok" >"$token_file"
+  chmod 600 "$token_file"               # keel:allow-direct файл самого keel
+  ok "Токен сохранён в ${token_file}"
+  KEEL_GUEST_TOKEN=$tok
   return 0
 }
 
@@ -425,7 +471,7 @@ lxc_ensure_template() {
 # Пароль в него попадает, поэтому файл создаётся с правами 600, а на экран
 # и в лог уходит только его версия с замаскированным паролем.
 _lxc_post_install_script() {
-  local i=$1 user=$2 password=$3
+  local i=$1 user=$2 password=$3 token=${4:-}
   local n j
 
   printf '#!/usr/bin/env bash\n'
@@ -445,14 +491,20 @@ _lxc_post_install_script() {
     printf 'apt-get install -y --no-install-recommends %s\n' "$(IFS=' '; printf '%s' "${pkgs[*]}")"
   fi
 
-  printf 'id -u %s >/dev/null 2>&1 || adduser --disabled-password --gecos "" %s\n' "$user" "$user"
-  printf 'printf "%%s:%%s" "%s" "%s" | chpasswd\n' "$user" "$password"
-  printf 'for g in sudo video render audio; do getent group "$g" >/dev/null && adduser %s "$g" || true; done\n' "$user"
+  # Пользователь заводится только там, где в него будут входить. Служебному
+  # контейнеру вроде туннеля он не нужен, и создавать его «на всякий случай»
+  # значит оставлять лишнюю учётную запись с паролем.
+  if prof_bool needs_password; then
+    printf 'id -u %s >/dev/null 2>&1 || adduser --disabled-password --gecos "" %s\n' "$user" "$user"
+    printf 'printf "%%s:%%s" "%s" "%s" | chpasswd\n' "$user" "$password"
+    printf 'for g in sudo video render audio; do getent group "$g" >/dev/null && adduser %s "$g" || true; done\n' "$user"
+  fi
 
   # Права на видеокарту: вместо того чтобы угадывать gid (в Ubuntu render=993,
   # в Debian 104, и это меняется), смотрим, какой группе устройство досталось
   # на самом деле, и добавляем пользователя именно в неё.
-  cat <<'DRI'
+  if prof_bool lxc.dri; then
+    cat <<'DRI'
 if [ -d /dev/dri ]; then
   for dev in /dev/dri/*; do
     [ -e "$dev" ] || continue
@@ -466,21 +518,37 @@ if [ -d /dev/dri ]; then
   done
 fi
 DRI
+  fi
 
   n=$(prof_len runcmd)
   for (( j = 0; j < n; j++ )); do printf '%s\n' "$(prof_get "runcmd.${j}")"; done
   n=$(config_len "guests.${i}.runcmd")
   for (( j = 0; j < n; j++ )); do printf '%s\n' "$(config_get "guests.${i}.runcmd.${j}")"; done
+
+  # Команда, в которую подставляется токен. Что именно делать с токеном, знает
+  # профиль, а не keel: здесь только подстановка. Идёт последней, после runcmd,
+  # потому что к этому моменту нужная программа уже установлена.
+  local token_cmd; token_cmd=$(prof_get token_command "")
+  if [[ -n "$token_cmd" ]]; then
+    printf '%s\n' "${token_cmd//KEEL_TOKEN/$token}"
+  fi
+
+  # Сценарий уносит с собой пароль и токен, а после выполнения остаётся лежать
+  # в контейнере. Поэтому последней строкой он удаляет сам себя: открытый
+  # дескриптор у bash остаётся, дочитать себя он успеет.
+  printf 'rm -f "$0"\n'
 }
 
 lxc_post_install() {
-  local i=$1 id=$2 user=$3 password=$4
+  local i=$1 id=$2 user=$3 password=$4 token=${5:-}
   local script preview
   script=$(mktemp); chmod 600 "$script"   # keel:allow-direct временный файл keel
-  _lxc_post_install_script "$i" "$user" "$password" \
+  _lxc_post_install_script "$i" "$user" "$password" "$token" \
     | sed "s/KEEL_USER/${user}/g" >"$script"
 
-  preview=$(sed "s/${password//\//\\/}/********/g" "$script")
+  keel_mask_add "$password"
+  keel_mask_add "$token"
+  preview=$(keel_mask_apply "$(cat "$script")")
   info "Внутри контейнера будет выполнено:"
   printf '%s\n' "$preview" | sed 's/^/    /'
 
@@ -506,7 +574,10 @@ lxc_create() {
   user=$(config_get "guests.${i}.cloudinit.user" "$(config_get "guests.${i}.user" admin)")
   tmplstore=$(prof_get template.storage local)
 
-  guest_password "$id" "$name" || return $?
+  KEEL_GUEST_SECRET=""
+  KEEL_GUEST_TOKEN=""
+  prof_bool needs_password && { guest_password "$id" "$name" || return $?; }
+  prof_bool needs_token    && { guest_token "$name" || return $?; }
   lxc_ensure_template "$(prof_get template.pattern)" "$tmplstore" || return $?
 
   local args=(
@@ -531,9 +602,12 @@ lxc_create() {
   fi
 
   run "Запустить контейнер ${id}" pct start "$id" || return $?
-  lxc_post_install "$i" "$id" "$user" "$KEEL_GUEST_SECRET" || return $?
+  lxc_post_install "$i" "$id" "$user" "$KEEL_GUEST_SECRET" "$KEEL_GUEST_TOKEN" || return $?
 
-  ok "Контейнер ${name} готов. Вход по RDP: пользователь ${user}."
+  # Что делать дальше, знает профиль: у рабочего стола это вход по RDP,
+  # у туннеля — проверка в панели Cloudflare
+  local hint; hint=$(prof_get ready_hint "")
+  ok "Контейнер ${name} готов.${hint:+ ${hint//KEEL_USER/$user}}"
   return 0
 }
 

@@ -44,7 +44,7 @@ A этой проблемы не существует как класса.
   "cores": 4,
   "memory": 8192,
   "disk": "64G",
-  "cloudinit": { "user": "alex", "ssh_key_from": "host" },
+  "cloudinit": { "user": "av", "ssh_key_from": "host" },
   "packages": ["keepassxc", "remmina"]
 }
 ```
@@ -182,7 +182,7 @@ lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
 
 Половина работы — и она сделана заранее, а не «как-нибудь потом».
 
-keel записывает в `/var/lib/keel/gpu-passthrough.state` всё, что изменил, и
+keel записывает в `/root/keel/gpu-passthrough.state` всё, что изменил, и
 где лежат резервные копии. Откат идёт по этой записи, а не по догадке:
 
 ```bash

@@ -81,12 +81,28 @@
       "start_on_boot": true,
 
       "cloudinit": {
-        "user": "alex",
+        "user": "av",
         "ssh_key_from": "host"     // взять открытые ключи с хоста
       },
 
       // Добавляется к списку из профиля, а не заменяет его
       "packages": ["keepassxc", "remmina"]
+    },
+
+    {
+      // Туннель Cloudflare: пускает твои сервисы наружу без открытых портов,
+      // белого IP и проброса на роутере. Отдельный маленький контейнер.
+      //
+      // Токен в манифест не пишется никогда: keel спросит его при создании и
+      // положит в /root/keel/secrets/cloudflared.txt. Посмотреть потом —
+      // keel token. Сам туннель и маршруты к сервисам настраиваются в панели
+      // Cloudflare, это не автоматизируется — см. docs/40-cloudflared.md.
+      "id": 102,
+      "name": "tunnel",
+      "profile": "cloudflared",
+      "storage": "local-lvm",
+      "bridge": "vmbr0",
+      "start_on_boot": true
     }
   ],
 
@@ -97,7 +113,7 @@
     "schedule": "02:00",
     "storage": "local",
     "mode": "snapshot",
-    "guests": [100, 101],
+    "guests": [100, 101, 102],
     "keep_last": 3,
     "compress": "zstd"
   }

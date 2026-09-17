@@ -5,11 +5,11 @@
 ```bash
 keel logs                       # полный вывод последнего запуска
 keel doctor                     # что за хост и в каком он состоянии
-ls /var/lib/keel/backups/       # копии файлов, снятые до каждой правки
+ls /root/keel/backups/       # копии файлов, снятые до каждой правки
 ```
 
 Перед любой правкой файла keel кладёт его копию в
-`/var/lib/keel/backups/<дата>/<путь>`. Вернуть как было — обычный `cp`.
+`/root/keel/backups/<дата>/<путь>`. Вернуть как было — обычный `cp`.
 
 ---
 
@@ -110,16 +110,16 @@ keel password 101
 Если файла нет — пароль задавался вручную при создании. Сменить изнутри:
 
 ```bash
-pct exec 101 -- passwd alex
+pct exec 101 -- passwd av
 ```
 
 ## Скачивание образа обрывается
 
-Образы кэшируются в `/var/lib/keel/images`. Недокачанный файл останется там и
+Образы кэшируются в `/root/keel/images`. Недокачанный файл останется там и
 помешает повторной попытке — удали его и запусти снова:
 
 ```bash
-rm /var/lib/keel/images/имя-файла
+rm /root/keel/images/имя-файла
 keel apply --only guests/50-guests
 ```
 
@@ -134,8 +134,8 @@ KEEL_ALLOW_NON_PVE=1 keel apply
 ## Что-то применилось не так, как хотелось
 
 ```bash
-ls -la /var/lib/keel/backups/          # выбрать нужную дату
-cp /var/lib/keel/backups/2026-09-15_030000/etc/network/interfaces /etc/network/interfaces
+ls -la /root/keel/backups/          # выбрать нужную дату
+cp /root/keel/backups/2026-09-15_030000/etc/network/interfaces /etc/network/interfaces
 ```
 
 Резервные копии снимаются автоматически перед каждой правкой файла, без

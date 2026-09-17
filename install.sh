@@ -4,7 +4,8 @@
 #
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/vshivtsev-dev/keel/main/install.sh)"
 #
-# Кладёт репозиторий в /opt/keel и делает команду keel доступной.
+# Кладёт код в /root/keel/app и делает команду keel доступной. Всё, с чем
+# работаешь ты — манифест, пароли, логи, копии, — лежит рядом, в /root/keel.
 # Систему при этом не настраивает — это делает уже сам keel, и только
 # после того, как ты посмотришь план.
 #
@@ -17,7 +18,8 @@ set -Eeuo pipefail
 KEEL_OWNER="${KEEL_OWNER:-vshivtsev-dev}"
 KEEL_NAME="${KEEL_NAME:-keel}"
 KEEL_BRANCH="${KEEL_BRANCH:-main}"
-KEEL_PREFIX="${KEEL_PREFIX:-/opt/keel}"
+KEEL_HOME="${KEEL_HOME:-/root/keel}"
+KEEL_PREFIX="${KEEL_PREFIX:-${KEEL_HOME}/app}"
 KEEL_BIN="${KEEL_BIN:-/usr/local/bin/keel}"
 KEEL_TARBALL="${KEEL_TARBALL:-https://codeload.github.com/${KEEL_OWNER}/${KEEL_NAME}/tar.gz/refs/heads/${KEEL_BRANCH}}"
 
@@ -53,6 +55,47 @@ command -v whiptail >/dev/null 2>&1 \
 [[ -e "$KEEL_PREFIX" && ! -d "$KEEL_PREFIX" ]] \
   && die "${KEEL_PREFIX} существует и это не каталог. Убери его или задай KEEL_PREFIX."
 
+# --- Переезд со старой раскладки ---------------------------------------------
+#
+# Версии до 0.2.0 раскладывали keel по трём местам: код в /opt/keel, данные в
+# /var/lib/keel, логи в /var/log/keel. Помнить три пути неудобно, поэтому всё
+# переезжает в один каталог. Данные переносятся, код — нет: удалить старый
+# каталог с кодом решает человек.
+
+migrate_dir() {
+  local from=$1 to=$2 what=$3
+  [[ -d "$from" ]] || return 0
+  # Пустой каталог переносить незачем
+  [[ -n "$(ls -A "$from" 2>/dev/null)" ]] || { rmdir "$from" 2>/dev/null || true; return 0; }
+  mkdir -p "$to"
+  local item
+  for item in "$from"/* "$from"/.[!.]*; do
+    [[ -e "$item" ]] || continue
+    if [[ -e "${to}/$(basename "$item")" ]]; then
+      warn "Уже есть ${to}/$(basename "$item") — оставляю как есть, старое в ${from}"
+      continue
+    fi
+    mv "$item" "$to"/
+  done
+  rmdir "$from" 2>/dev/null || true
+  ok "Перенесено: ${what} → ${to}"
+}
+
+if [[ -d /var/lib/keel || -d /var/log/keel || -f /opt/keel/manifest/host.json ]]; then
+  printf '\nНашлась установка старой раскладки — переношу данные в %s\n' "$KEEL_HOME"
+  mkdir -p "$KEEL_HOME"
+  if [[ -f /opt/keel/manifest/host.json ]]; then
+    if [[ -e "${KEEL_HOME}/host.json" ]]; then
+      warn "Манифест ${KEEL_HOME}/host.json уже есть — старый оставлен в /opt/keel/manifest/"
+    else
+      mv /opt/keel/manifest/host.json "${KEEL_HOME}/host.json"
+      ok "Перенесено: манифест → ${KEEL_HOME}/host.json"
+    fi
+  fi
+  migrate_dir /var/lib/keel "$KEEL_HOME"        "состояние, пароли, копии, образы"
+  migrate_dir /var/log/keel "${KEEL_HOME}/logs" "логи"
+fi
+
 # --- Установка ---------------------------------------------------------------
 
 tmp=$(mktemp)
@@ -68,9 +111,9 @@ else
   die "Нет ни curl, ни wget — скачать репозиторий нечем."
 fi
 
-mkdir -p "$KEEL_PREFIX"
-# Твой manifest/host.json в архиве отсутствует (он в .gitignore),
-# поэтому распаковка поверх его не затирает
+mkdir -p "$KEEL_HOME" "$KEEL_PREFIX"
+# Распаковка затирает app/ целиком — и это нормально: там только код.
+# Твой host.json лежит уровнем выше, до него она не дотягивается.
 tar -xzf "$tmp" -C "$KEEL_PREFIX" --strip-components=1 \
   || die "Не удалось распаковать архив в ${KEEL_PREFIX}"
 ok "keel распакован в ${KEEL_PREFIX}"
@@ -79,9 +122,13 @@ chmod +x "${KEEL_PREFIX}/bin/keel" "${KEEL_PREFIX}/tests/"*.sh 2>/dev/null || tr
 ln -sfn "${KEEL_PREFIX}/bin/keel" "$KEEL_BIN"
 ok "Команда keel доступна: ${KEEL_BIN}"
 
-if [[ ! -f "${KEEL_PREFIX}/manifest/host.json" ]]; then
-  cp "${KEEL_PREFIX}/manifest/host.example.json" "${KEEL_PREFIX}/manifest/host.json"
-  ok "Создан манифест ${KEEL_PREFIX}/manifest/host.json — поправь его под себя"
+if [[ ! -f "${KEEL_HOME}/host.json" ]]; then
+  cp "${KEEL_PREFIX}/manifest/host.example.json" "${KEEL_HOME}/host.json"
+  ok "Создан манифест ${KEEL_HOME}/host.json — поправь его под себя"
+fi
+
+if [[ -d /opt/keel ]]; then
+  warn "Старый каталог кода /opt/keel больше не используется. Убрать: rm -rf /opt/keel"
 fi
 
 cat <<EOF
@@ -92,6 +139,11 @@ cat <<EOF
   keel plan       увидеть, что изменится — ничего не выполняется
   keel            меню
 
-Манифест (единственный файл, который ты правишь):
-  ${KEEL_PREFIX}/manifest/host.json
+Всё твоё — в одном каталоге ${KEEL_HOME}:
+
+  host.json     манифест: единственный файл, который ты правишь
+  secrets/      пароли гостей и токены
+  backups/      копии файлов до того, как keel их правил
+  logs/         логи запусков
+  app/          код keel — перезаписывается при обновлении
 EOF

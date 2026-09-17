@@ -56,7 +56,11 @@ ui_menu() {
   local title=$1 text=$2; shift 2
   local count=$(( $# / 2 ))
   if ui_has_whiptail; then
-    whiptail --title "$title" --notags --menu "$text" \
+    # --default-item задаёт выделенный пункт явно, а не оставляет на усмотрение
+    # newt. Флаг относится только к --menu; у --checklist его нет, и пробовать
+    # там не будем: whiptail на неизвестный флаг просто выходит с ошибкой, а мы
+    # её глушим — получился бы молча пустой выбор.
+    whiptail --title "$title" --notags --default-item "$1" --menu "$text" \
       "$(_ui_height "$count" 10)" 78 "$count" "$@" 3>&1 1>&2 2>&3 || true
   else
     local i=1 tags=() args=("$@")
@@ -103,21 +107,50 @@ ui_checklist() {
 
 # Экран подтверждения одного изменения.
 # Печатает в stdout ровно одно слово: apply | skip | abort
+#
+# Здесь нет --scrolltext, и это важно. В newt прокручиваемый текстовый блок
+# принимает фокус и стоит в форме первым: при открытии стрелки листали бы
+# diff, а до списка пришлось бы уходить вправо. Поэтому текст обрезается до
+# экрана, а целиком его показывает отдельный пункт меню — там прокрутка
+# уместна, кнопка одна, и фокус на тексте это ровно то, что нужно.
+KEEL_CONFIRM_BODY_LINES="${KEEL_CONFIRM_BODY_LINES:-14}"
+
+_ui_clip() {
+  local body=$1 limit=$2 n
+  n=$(printf '%s\n' "$body" | wc -l)
+  if (( n <= limit )); then
+    printf '%s' "$body"
+    return 0
+  fi
+  printf '%s\n' "$body" | head -n "$limit"
+  printf '… ещё %s строк — пункт «показать целиком»' "$(( n - limit ))"
+}
+
 ui_confirm_step() {
   local desc=$1 body=$2
-  local text="Будет выполнено:
+  if ui_has_whiptail; then
+    local short text choice
+    short=$(_ui_clip "$body" "$KEEL_CONFIRM_BODY_LINES")
+    text="Будет выполнено:
 
 ${desc}
 
-${body}"
-  if ui_has_whiptail; then
-    local choice
-    choice=$(whiptail --title "Подтверждение изменения" --notags --scrolltext \
-      --menu "$text" "$(_ui_height "$(_ui_lines "$text")" 12)" 78 3 \
-      apply "Применить" \
-      skip  "Пропустить этот шаг" \
-      abort "Прервать" 3>&1 1>&2 2>&3) || choice="abort"
-    printf '%s' "${choice:-abort}"
+${short}"
+    while true; do
+      choice=$(whiptail --title "Подтверждение изменения" --notags \
+        --default-item apply --menu "$text" \
+        "$(_ui_height "$(_ui_lines "$text")" 12)" 78 4 \
+        apply "Применить" \
+        skip  "Пропустить этот шаг" \
+        full  "Показать целиком" \
+        abort "Прервать" 3>&1 1>&2 2>&3) || choice="abort"
+      if [[ "$choice" == "full" ]]; then
+        ui_msgbox "$desc" "$body"
+        continue
+      fi
+      printf '%s' "${choice:-abort}"
+      return 0
+    done
   else
     printf '\n%s\n%s\n' "$desc" "$body" >&2
     local reply

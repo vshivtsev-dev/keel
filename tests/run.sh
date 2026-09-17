@@ -38,9 +38,14 @@ assert_rc() {
 
 # Загрузить библиотеки в текущую (под)оболочку и увести все пути во временный каталог
 load_keel() {
+  # Все пути уводим во временный каталог: ни один тест не смеет притронуться
+  # к настоящему /root/keel. За этим следит отдельная проверка ниже.
+  export KEEL_HOME="${T}/home"
   export KEEL_LOG_DIR="${T}/log"
   export KEEL_STATE_DIR="${T}/state"
   export KEEL_BACKUP_DIR="${T}/state/backups"
+  export KEEL_SECRETS_DIR="${T}/state/secrets"
+  export KEEL_MANIFEST="${T}/home/host.json"
   export KEEL_UI="plain"
   # shellcheck source=../lib/core.sh
   source "${KEEL_ROOT}/lib/core.sh"
@@ -699,7 +704,7 @@ test_guests_cloudinit_vm_commands() {
 { "guests": [ {
   "id": 101, "name": "desktop", "profile": "desktop", "graphics": "virgl",
   "storage": "local-lvm", "disk": "64G",
-  "cloudinit": { "user": "alex", "ipconfig": "ip=dhcp" },
+  "cloudinit": { "user": "av", "ipconfig": "ip=dhcp" },
   "packages": ["obs-studio"]
 } ] }
 EOF
@@ -717,7 +722,7 @@ EOF
   local snippet="${T}/vz/snippets/keel-101-user.yml"
   [[ -f "$snippet" ]] || fail "сниппет cloud-init не записан"
   assert_contains "$(cat "$snippet")" "#cloud-config"
-  assert_contains "$(cat "$snippet")" "name: alex"
+  assert_contains "$(cat "$snippet")" "name: av"
   assert_contains "$(cat "$snippet")" "- vlc"          # из профиля
   assert_contains "$(cat "$snippet")" "- obs-studio"   # из манифеста
   assert_contains "$(cat "$snippet")" "systemctl set-default graphical.target"
@@ -746,7 +751,7 @@ test_guests_lxc_desktop_commands() {
 { "guests": [ {
   "id": 102, "name": "desktop", "profile": "desktop", "graphics": "dri",
   "storage": "local-lvm", "disk": "64G", "cores": 4, "memory": 8192,
-  "cloudinit": { "user": "alex" }
+  "cloudinit": { "user": "av" }
 } ] }
 EOF
   config_load "${T}/m.json"
@@ -766,12 +771,12 @@ EOF
 
 test_guests_lxc_password_never_in_log() {
   _fake_guest_host
-  printf '{ "guests": [ { "id": 102, "name": "d", "profile": "desktop", "graphics": "dri", "cloudinit": { "user": "alex" } } ] }' >"${T}/m.json"
+  printf '{ "guests": [ { "id": 102, "name": "d", "profile": "desktop", "graphics": "dri", "cloudinit": { "user": "av" } } ] }' >"${T}/m.json"
   config_load "${T}/m.json"
   export KEEL_MODE="yes"
   local out; out=$(mod_out guests/50-guests apply)
 
-  local secret_file="${KEEL_STATE_DIR}/secrets/102.txt"
+  local secret_file="${KEEL_SECRETS_DIR}/102.txt"
   [[ -f "$secret_file" ]] || fail "пароль не сохранён в ${secret_file}"
   local pw; pw=$(cat "$secret_file")
   [[ -n "$pw" ]] || fail "пароль пустой"
@@ -872,11 +877,11 @@ test_cfgbackup_prunes_old_copies() {
 
 test_guests_lxc_fixes_dri_permissions_itself() {
   _fake_guest_host
-  printf '{ "guests": [ { "id": 102, "name": "d", "profile": "desktop", "graphics": "dri", "cloudinit": { "user": "alex" } } ] }' >"${T}/m.json"
+  printf '{ "guests": [ { "id": 102, "name": "d", "profile": "desktop", "graphics": "dri", "cloudinit": { "user": "av" } } ] }' >"${T}/m.json"
   config_load "${T}/m.json"
   profile_load desktop-lxc
 
-  local script; script=$(_lxc_post_install_script 0 alex секрет)
+  local script; script=$(_lxc_post_install_script 0 av секрет)
   # Номер группы внутри контейнера угадывать нельзя: в Ubuntu render=993,
   # в Debian 104. Сценарий должен смотреть на фактического владельца.
   assert_contains "$script" 'gid=$(stat -c %g "$dev")'
@@ -1227,7 +1232,7 @@ STUB
 test_lxc_install_line_keeps_packages_together() {
   local IFS=$'\n\t'
   _fake_guest_host
-  printf '{ "guests": [ { "id": 102, "name": "d", "profile": "desktop", "graphics": "dri", "cloudinit": { "user": "alex" }, "packages": ["mc"] } ] }' >"${T}/m.json"
+  printf '{ "guests": [ { "id": 102, "name": "d", "profile": "desktop", "graphics": "dri", "cloudinit": { "user": "av" }, "packages": ["mc"] } ] }' >"${T}/m.json"
   config_load "${T}/m.json"
   export KEEL_MODE="yes"
   local out; out=$(mod_out guests/50-guests apply)
@@ -1247,12 +1252,12 @@ ${out}"
 # Просмотр плана не создаёт ничего, включая файл с паролем.
 test_dry_run_creates_no_secret_file() {
   _fake_guest_host
-  printf '{ "guests": [ { "id": 102, "name": "d", "profile": "desktop", "graphics": "dri", "cloudinit": { "user": "alex" } } ] }' >"${T}/m.json"
+  printf '{ "guests": [ { "id": 102, "name": "d", "profile": "desktop", "graphics": "dri", "cloudinit": { "user": "av" } } ] }' >"${T}/m.json"
   config_load "${T}/m.json"
   export KEEL_MODE="dry"
   mod_out guests/50-guests apply >/dev/null
 
-  local secret_file="${KEEL_STATE_DIR}/secrets/102.txt"
+  local secret_file="${KEEL_SECRETS_DIR}/102.txt"
   if [[ -e "$secret_file" ]]; then
     fail "просмотр плана создал ${secret_file} — он обязан ничего не менять"
   fi
@@ -1295,6 +1300,121 @@ ${hits}"
   fi
 }
 
+
+# --- Один каталог, туннель и экран подтверждения -----------------------------
+
+# Всё, с чем работает человек, лежит в KEEL_HOME и больше нигде. Раньше пути
+# расходились по /opt, /var/lib и /var/log, и приходилось помнить три места.
+test_paths_all_live_under_home() {
+  local home="${T}/дом" out line
+  out=$(env -u KEEL_LOG_DIR -u KEEL_STATE_DIR -u KEEL_BACKUP_DIR \
+            -u KEEL_SECRETS_DIR -u KEEL_MANIFEST KEEL_HOME="$home" \
+        bash -c 'source "$1"/lib/core.sh
+                 printf "%s\n%s\n%s\n%s\n" \
+                   "$KEEL_LOG_DIR" "$KEEL_STATE_DIR" "$KEEL_BACKUP_DIR" "$KEEL_SECRETS_DIR"' \
+        _ "$KEEL_ROOT")
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    [[ "$line" == "${home}"* ]] || fail "путь ${line} уехал из ${home}"
+  done <<< "$out"
+
+  # И это не только значения переменных: настоящий запуск кладёт туда же
+  env -u KEEL_LOG_DIR -u KEEL_STATE_DIR -u KEEL_BACKUP_DIR \
+      -u KEEL_SECRETS_DIR -u KEEL_MANIFEST KEEL_HOME="$home" \
+      "${KEEL_ROOT}/bin/keel" --plain version >/dev/null
+  [[ -f "${home}/journal.tsv" ]] || fail "журнал не лёг в ${home}"
+  compgen -G "${home}/logs/*.log" >/dev/null || fail "лог не лёг в ${home}/logs"
+}
+
+# Туннель без токена — это не туннель. Придумать токен keel не может,
+# поэтому обязан отказаться, а не сделать вид, что справился.
+test_cloudflared_refuses_without_token() {
+  _fake_guest_host
+  stub_says "pveam.available" <<'EOF'
+system          debian-13-standard_13.1-1_amd64.tar.zst
+EOF
+  printf '{ "guests": [ { "id": 102, "name": "tunnel", "profile": "cloudflared" } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+
+  assert_eq "$(mod_rc guests/50-guests apply)" "1" "без токена должен быть отказ"
+  assert_contains "$(mod_out guests/50-guests apply)" "Нет токена"
+  assert_not_ran "pct create"
+}
+
+# С токеном: он доходит до контейнера, но не появляется на экране.
+test_cloudflared_installs_service_and_hides_token() {
+  _fake_guest_host
+  stub_says "pveam.available" <<'EOF'
+system          debian-13-standard_13.1-1_amd64.tar.zst
+EOF
+  mkdir -p "$KEEL_SECRETS_DIR"
+  printf 'eyJhIjoiСЕКРЕТНЫЙТОКЕН"\n' >"${KEEL_SECRETS_DIR}/cloudflared.txt"
+  printf '{ "guests": [ { "id": 102, "name": "tunnel", "profile": "cloudflared" } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+  local out; out=$(mod_out guests/50-guests apply)
+
+  assert_ran "pct create 102"
+  assert_contains "$out" "cloudflared service install"
+  if printf '%s' "$out" | grep -qF 'eyJhIjoiСЕКРЕТНЫЙТОКЕН"'; then
+    fail "токен показан на экране"
+  fi
+  if grep -rqF 'eyJhIjoiСЕКРЕТНЫЙТОКЕН"' "$KEEL_LOG_DIR" 2>/dev/null; then
+    fail "токен попал в лог"
+  fi
+  assert_contains "$out" "********"
+
+  # Служебному контейнеру пользователь не нужен
+  if printf '%s' "$out" | grep -q 'chpasswd'; then
+    fail "туннелю завели пользователя с паролем — он там не нужен"
+  fi
+}
+
+# Просмотр плана не спрашивает токен и не создаёт файлов.
+test_cloudflared_dry_run_asks_nothing() {
+  _fake_guest_host
+  stub_says "pveam.available" <<'EOF'
+system          debian-13-standard_13.1-1_amd64.tar.zst
+EOF
+  printf '{ "guests": [ { "id": 102, "name": "tunnel", "profile": "cloudflared" } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="dry"
+  local out; out=$(mod_out guests/50-guests apply)
+
+  assert_contains "$out" "будет запрошен при применении"
+  [[ ! -e "${KEEL_SECRETS_DIR}/cloudflared.txt" ]] \
+    || fail "просмотр плана создал файл с токеном"
+  assert_not_ran "pct create"
+}
+
+# Сценарий первичной настройки уносит с собой пароль и токен — и не должен
+# оставаться в контейнере после выполнения.
+test_post_install_script_removes_itself() {
+  _fake_guest_host
+  printf '{ "guests": [ { "id": 102, "name": "d", "profile": "desktop", "graphics": "dri", "cloudinit": { "user": "av" } } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+  local out; out=$(mod_out guests/50-guests apply)
+
+  local last
+  last=$(printf '%s\n' "$out" | grep -E '^ +rm -f "\$0"' | tail -n1)
+  [[ -n "$last" ]] || fail "сценарий не удаляет себя — пароль останется лежать в контейнере:
+${out}"
+}
+
+# Экран подтверждения: длинный текст обрезается, короткий остаётся целым.
+test_confirm_clips_long_body() {
+  local body short
+  body=$(seq 1 40)
+  short=$(_ui_clip "$body" 14)
+  assert_eq "$(printf '%s\n' "$short" | wc -l)" "15" "14 строк плюс строка про остаток"
+  assert_contains "$short" "показать целиком"
+
+  short=$(_ui_clip "$(seq 1 5)" 14)
+  assert_eq "$short" "$(seq 1 5)" "короткий текст обрезать не надо"
+}
+
 # --- Запуск ------------------------------------------------------------------
 
 printf '\nОкружение\n'
@@ -1324,6 +1444,8 @@ it "core: выравнивание по символам, не байтам"  te
 it "core: dry-run ничего не выполняет"          test_core_dry_run_executes_nothing
 it "core: run_write идемпотентен"               test_core_run_write_adds_newline_and_is_idempotent
 it "core: run_write делает резервную копию"     test_core_run_write_makes_backup
+it "core: все пути внутри KEEL_HOME"            test_paths_all_live_under_home
+it "ui: длинный diff обрезается для экрана"     test_confirm_clips_long_body
 
 printf '\nМодуль репозиториев\n'
 it "repos: правило нуля без манифеста"          test_repos_zero_rule_without_manifest
@@ -1366,6 +1488,10 @@ it "guests: пароль не утекает в лог и на экран" test_
 it "guests: права на /dev/dri чинятся сами"     test_guests_lxc_fixes_dri_permissions_itself
 it "guests: пакеты одной строкой"               test_lxc_install_line_keeps_packages_together
 it "guests: просмотр не создаёт файл с паролем" test_dry_run_creates_no_secret_file
+it "guests: сценарий удаляет себя в контейнере" test_post_install_script_removes_itself
+it "туннель: без токена — отказ"                test_cloudflared_refuses_without_token
+it "туннель: токен доезжает, но не светится"    test_cloudflared_installs_service_and_hides_token
+it "туннель: просмотр ничего не спрашивает"     test_cloudflared_dry_run_asks_nothing
 
 printf '\nФаза 3: копия конфигурации хоста\n'
 it "config-backup: правило нуля"                test_cfgbackup_zero_rule

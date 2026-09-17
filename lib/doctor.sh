@@ -16,9 +16,11 @@ _doc_bad()     { printf '  %s✗%s %s %s\n' "$C_RED"    "$C_RESET" "$(pad "$1" 2
 doctor_environment() {
   _doc_section "Окружение keel"
   _doc_row "Версия"      "$KEEL_VERSION"
-  _doc_row "Каталог"     "$KEEL_ROOT"
+  _doc_row "Твой каталог" "$KEEL_HOME"
+  _doc_row "Код"         "$KEEL_ROOT"
   _doc_row "Лог"         "${KEEL_LOG_FILE:-—}"
-  _doc_row "Состояние"   "$KEEL_STATE_DIR"
+  _doc_row "Секреты"     "$KEEL_SECRETS_DIR"
+  _doc_row "Копии файлов" "$KEEL_BACKUP_DIR"
 
   if [[ "$(id -u)" -eq 0 ]]; then
     _doc_ok "Права" "root"
@@ -50,7 +52,7 @@ doctor_environment() {
     fi
   else
     _doc_warn "Манифест" "не найден — модули останутся ненастроенными"
-    _doc_row "" "создать: cp manifest/host.example.json manifest/host.json"
+    _doc_row "" "создать: cp ${KEEL_ROOT}/manifest/host.example.json ${KEEL_MANIFEST}"
   fi
 }
 
