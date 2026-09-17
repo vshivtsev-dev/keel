@@ -98,7 +98,7 @@ Hostname** → **Add a public hostname**.
 | Subdomain | `ha` |
 | Domain | `твой-домен.ru` |
 | Service → Type | `HTTP` |
-| Service → URL | `192.168.1.50:8123` |
+| Service → URL | `<адрес гостя>:8123` — например, тот, что Proxmox показывает на вкладке ВМ |
 
 Адрес — это IP **гостя**, а не контейнера с туннелем: туннель ходит до
 сервиса по локальной сети. Узнать адрес гостя:
@@ -149,7 +149,7 @@ pct exec 102 -- getent hosts github.com
 на внешнем интерфейсе. Проверь изнутри контейнера с туннелем:
 
 ```bash
-pct exec 102 -- curl -sS -o /dev/null -w '%{http_code}\n' http://192.168.1.50:8123
+pct exec 102 -- curl -sS -o /dev/null -w '%{http_code}\n' http://<адрес-гостя>:8123
 ```
 
 ---

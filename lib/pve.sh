@@ -188,6 +188,100 @@ apt_sources_error() {
   LC_ALL=C apt-get -s dist-upgrade 2>&1 >/dev/null | grep '^E:' || true
 }
 
+# --- Связь до репозиториев ----------------------------------------------------
+#
+# Однажды apt на этом хосте дорос до 6.4 ГБ и едва не увёл машину в OOM. Причина
+# была не в apt: DNS отдавал IPv6-адреса, маршрута до них не было, IPv4 отдавал
+# 4 КБ/с. Очередь закачек на сотню пакетов раз за разом откладывала и
+# переставляла элементы, каждый со своим состоянием, — отсюда и гигабайты.
+# Поэтому перед закачкой связь проверяется, а не предполагается.
+
+# Первая ссылка из тех, что apt собирается скачать. Пусто — качать нечего.
+# Это лучшая проба связи: файл точно существует и лежит ровно там, куда пойдёт
+# обновление, — в отличие от любого адреса, выдуманного нами.
+apt_first_upgrade_uri() {
+  command -v apt-get >/dev/null 2>&1 || return 0
+  local out
+  out=$(LC_ALL=C apt-get --print-uris -qq -y dist-upgrade 2>/dev/null \
+        | sed -n "s/^'\([^']*\)'.*/\1/p") || true
+  printf '%s' "${out%%$'\n'*}"
+}
+
+# Сколько всего байт предстоит скачать. Нужно, чтобы сказать человеку не
+# «медленно», а «на такой скорости это займёт полтора часа».
+apt_upgrade_total_bytes() {
+  command -v apt-get >/dev/null 2>&1 || { printf '0'; return 0; }
+  local out
+  out=$(LC_ALL=C apt-get --print-uris -qq -y dist-upgrade 2>/dev/null \
+        | awk '{ s += $3 } END { print s + 0 }') || true
+  printf '%s' "${out:-0}"
+}
+
+# Скорость закачки по ссылке, байт/с. «0» — не достучались.
+# Диапазон держит пробу в пределах 4 МБ: мерить скорость, выкачивая пакет
+# целиком, невежливо по отношению к зеркалу. curl здесь только читает.
+net_download_speed() {
+  local url=$1 secs=${2:-15} out
+  command -v curl >/dev/null 2>&1 || { printf '0'; return 0; }
+  out=$(LC_ALL=C curl -sS --max-time "$secs" --range 0-4194304 \
+          -o /dev/null -w '%{speed_download}' "$url" 2>/dev/null) || true
+  out=${out%%.*}          # curl печатает дробное, нам нужны целые байты
+  [[ "$out" =~ ^[0-9]+$ ]] || out=0
+  printf '%s' "$out"
+}
+
+# "30K" → 30720, "2M" → 2097152, "4096" → 4096. Мусор → 0.
+speed_to_bytes() {
+  local v=${1:-} n
+  n=${v%[KkMm]}
+  [[ "$n" =~ ^[0-9]+$ ]] || { printf '0'; return 0; }
+  case "$v" in
+    *[Kk]) printf '%s' $(( n * 1024 )) ;;
+    *[Mm]) printf '%s' $(( n * 1024 * 1024 )) ;;
+    *)     printf '%s' "$n" ;;
+  esac
+}
+
+# Есть ли маршрут по умолчанию для IPv6
+host_ipv6_default_route() {
+  command -v ip >/dev/null 2>&1 || return 1
+  [[ -n "$(ip -6 route show default 2>/dev/null)" ]]
+}
+
+# Хосты включённых источников apt. Спрашиваем сам apt: он знает про
+# «Enabled: false» и про всё, что мы могли не учесть, разбирая файлы глазами.
+apt_repo_hosts() {
+  local out=""
+  if command -v apt-get >/dev/null 2>&1; then
+    out=$(LC_ALL=C apt-get indextargets --no-release-info --format '$(SITE)' 2>/dev/null \
+          | sort -u) || true
+  fi
+  if [[ -z "$out" ]]; then
+    out=$(cat "$(fsroot /etc/apt/sources.list)" \
+              "$(fsroot /etc/apt/sources.list.d)"/*.sources \
+              "$(fsroot /etc/apt/sources.list.d)"/*.list 2>/dev/null \
+          | sed -n -e 's#^URIs:[[:space:]]*##p' \
+                   -e 's#^deb[[:space:]]\+\(\[[^]]*\][[:space:]]*\)\?##p' \
+          | awk '{ print $1 }' \
+          | sed -e 's#^[a-z+]*://##' -e 's#/.*##' | sort -u) || true
+  fi
+  [[ -n "$out" ]] || return 0
+  printf '%s\n' "$out" | sed '/^$/d'
+}
+
+# Отдаёт ли DNS адреса IPv6 для этого хоста. Под timeout: doctor не имеет
+# права зависать на сломанном DNS.
+host_has_aaaa() {
+  local h=$1
+  [[ -n "$h" ]] || return 1
+  command -v getent >/dev/null 2>&1 || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 3 getent ahostsv6 "$h" >/dev/null 2>&1
+  else
+    getent ahostsv6 "$h" >/dev/null 2>&1
+  fi
+}
+
 # --- Хранилища ---------------------------------------------------------------
 
 _storage_cfg() { fsroot /etc/pve/storage.cfg; }

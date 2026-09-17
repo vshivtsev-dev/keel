@@ -76,6 +76,24 @@ doctor_host() {
     printf '%s\n' "$apt_err" | sed 's/^/      /'
   fi
 
+  # Случай, в котором apt однажды съел почти всю память хоста: DNS отдаёт
+  # AAAA-адреса, маршрута до них нет, и половина попыток уходит в никуда.
+  # Увидеть это надо до обновления, а не по следам.
+  if host_ipv6_default_route; then
+    _doc_row "IPv6" "маршрут по умолчанию есть"
+  else
+    local hosts repo_host
+    hosts=$(apt_repo_hosts)
+    repo_host=${hosts%%$'\n'*}
+    if host_has_aaaa "$repo_host"; then
+      _doc_warn "IPv6" "DNS отдаёт AAAA (${repo_host}), а маршрута нет"
+      _doc_row "" "половина попыток apt уйдёт в «Network is unreachable»"
+      _doc_row "" "лечится: echo 'Acquire::ForceIPv4 \"true\";' > /etc/apt/apt.conf.d/99force-ipv4"   # keel:allow-direct печатаемая подсказка, а не запись
+    else
+      _doc_row "IPv6" "не используется"
+    fi
+  fi
+
   local bridges; bridges=$(pve_bridges | paste -sd' ' -)
   _doc_row "Сетевые мосты" "${bridges:-—}"
 

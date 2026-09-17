@@ -63,6 +63,8 @@ load_keel() {
   source "${KEEL_ROOT}/lib/gpu.sh"
   # shellcheck source=../lib/modules.sh
   source "${KEEL_ROOT}/lib/modules.sh"
+  # shellcheck source=../lib/doctor.sh
+  source "${KEEL_ROOT}/lib/doctor.sh"
   core_init
   state_init
 }
@@ -1415,6 +1417,112 @@ test_confirm_clips_long_body() {
   assert_eq "$short" "$(seq 1 5)" "короткий текст обрезать не надо"
 }
 
+
+# --- Проба связи перед обновлением -------------------------------------------
+#
+# Однажды apt на живом хосте дорос до 6.4 ГБ и едва не увёл машину в OOM:
+# DNS отдавал IPv6, маршрута до него не было, IPv4 отдавал 4 КБ/с, а очередь
+# закачек на сотню пакетов копилась в памяти. Тесты ниже стерегут это место.
+
+# Хост, где apt-get отвечает как настоящий, а curl — с заданной скоростью
+_fake_slow_net() {
+  local speed=$1
+  stub_commands apt-get curl
+  stub_says "apt-get.-s" <<'EOF'
+Inst libc6 [2.41-12] (2.41-13 Debian:13 [amd64])
+Inst openssl [3.5.6] (3.5.7 Debian:13 [amd64])
+EOF
+  stub_says "apt-get.--print-uris" <<'EOF'
+'http://deb.debian.org/debian/pool/main/g/glibc/libc6_2.41-13_amd64.deb' libc6_2.41-13_amd64.deb 2851234 SHA256:aaa
+'http://deb.debian.org/debian/pool/main/o/openssl/openssl_3.5.7_amd64.deb' openssl_3.5.7_amd64.deb 1400000 SHA256:bbb
+EOF
+  stub_says "curl" <<EOF
+${speed}
+EOF
+  printf '{ "host": { "updates": true } }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+}
+
+test_updates_refuses_on_slow_network() {
+  _fake_slow_net 4094          # ровно та скорость, что была на живом хосте
+  local out; out=$(mod_out host/20-updates apply)
+
+  assert_eq "$(mod_rc host/20-updates apply)" "1" "на 4 КБ/с начинать нельзя"
+  assert_contains "$out" "этого мало"
+  assert_contains "$out" "3 КБ/с"          # 4094 Б/с округляется вниз
+  assert_not_ran "apt-get -y dist-upgrade"
+}
+
+test_updates_refuses_when_repo_silent() {
+  _fake_slow_net 0             # curl не достучался
+  local out; out=$(mod_out host/20-updates apply)
+
+  assert_eq "$(mod_rc host/20-updates apply)" "1" "молчащий репозиторий — не повод качать"
+  assert_contains "$out" "Репозиторий не отвечает"
+  assert_contains "$out" "libc6_2.41-13_amd64.deb"   # назвали, что именно не открылось
+  assert_not_ran "apt-get -y dist-upgrade"
+}
+
+test_updates_proceeds_on_good_network() {
+  _fake_slow_net 5000000
+  mod_rc host/20-updates apply >/dev/null
+  assert_ran "apt-get -y dist-upgrade"
+}
+
+test_updates_speed_check_can_be_switched_off() {
+  _fake_slow_net 4094
+  printf '{ "host": { "updates": true, "updates_min_speed": "0" } }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  mod_rc host/20-updates apply >/dev/null
+  assert_ran "apt-get -y dist-upgrade"
+  assert_not_ran "curl"        # пробы не было вовсе
+}
+
+test_updates_no_probe_when_nothing_to_download() {
+  stub_commands apt-get curl
+  stub_says "apt-get.-s" <<'EOF'
+Inst libc6 [2.41-12] (2.41-13 Debian:13 [amd64])
+EOF
+  # --print-uris молчит: всё уже скачано в кэш
+  printf '{ "host": { "updates": true } }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+
+  mod_rc host/20-updates apply >/dev/null
+  assert_not_ran "curl"
+  assert_ran "apt-get -y dist-upgrade"
+}
+
+test_apt_calls_carry_limits() {
+  _fake_slow_net 5000000
+  mod_rc host/20-updates apply >/dev/null
+  assert_ran "Acquire::Retries=1"
+  assert_ran "Acquire::http::Timeout=30"
+}
+
+# Маршрута IPv6 нет, а DNS адреса отдаёт — именно этот случай и съел память.
+test_doctor_warns_about_unreachable_ipv6() {
+  stub_commands ip getent apt-get
+  stub_says "apt-get.indextargets" <<'EOF'
+deb.debian.org
+EOF
+  # ip -6 route show default молчит — маршрута нет; getent отвечает — AAAA есть
+  local out; out=$(doctor_host 2>&1)
+  assert_contains "$out" "DNS отдаёт AAAA"
+  assert_contains "$out" "ForceIPv4"
+
+  # А теперь маршрут есть — предупреждать не о чем
+  stub_says "ip" <<'EOF'
+default via fe80::1 dev vmbr0 metric 1024
+EOF
+  out=$(doctor_host 2>&1)
+  assert_contains "$out" "маршрут по умолчанию есть"
+  if printf '%s' "$out" | grep -q "ForceIPv4"; then
+    fail "маршрут есть, а keel всё равно советует ForceIPv4"
+  fi
+}
+
 # --- Запуск ------------------------------------------------------------------
 
 printf '\nОкружение\n'
@@ -1461,6 +1569,13 @@ it "updates: правило нуля"                      test_updates_zero_rul
 it "updates: обновлять нечего"                  test_updates_nothing_to_do
 it "updates: ставит dist-upgrade"               test_updates_applies_dist_upgrade
 it "updates: битые источники — ошибка"          test_updates_refuses_when_apt_is_broken
+it "updates: медленная сеть — отказ"            test_updates_refuses_on_slow_network
+it "updates: молчащий репозиторий — отказ"      test_updates_refuses_when_repo_silent
+it "updates: нормальная сеть — качаем"          test_updates_proceeds_on_good_network
+it "updates: проверку скорости можно выключить" test_updates_speed_check_can_be_switched_off
+it "updates: качать нечего — пробы нет"         test_updates_no_probe_when_nothing_to_download
+it "updates: у apt ограничены повторы и ожидание" test_apt_calls_carry_limits
+it "doctor: предупреждает про IPv6 без маршрута" test_doctor_warns_about_unreachable_ipv6
 it "storage: чтение storage.cfg"                test_storage_reads_config
 it "storage: доводит content до описанного"     test_storage_adds_missing_content
 it "storage: порядок в списке не важен"         test_storage_already_correct

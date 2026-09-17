@@ -43,7 +43,13 @@ while IFS= read -r file; do
     printf '%s: похоже на настоящие данные: %s\n' "$file" "$match" >&2
     fail=1
   done < <(grep -hoE "$PATTERNS" "$file" 2>/dev/null | sort -u)
-done < <(git ls-files 2>/dev/null)
+done < <({ # core.quotePath=false: иначе git отдаёт кириллические имена как
+           # "docs/\320\222…", такой путь не открыть, и файл молча не проверится
+           git -c core.quotePath=false ls-files 2>/dev/null
+           # Новые файлы ещё не в индексе, а личные данные в них уже есть.
+           # Именно так в репозиторий однажды и уехал пример с адресом.
+           git -c core.quotePath=false ls-files --others --exclude-standard 2>/dev/null
+         } | sort -u)
 
 # 2. Манифест хоста не должен попадать в git никогда
 if git ls-files 2>/dev/null | grep -qx 'manifest/host.json'; then
@@ -61,4 +67,4 @@ if (( fail )); then
   printf '\nЛибо убери это из репозитория, либо внеси в %s осознанно.\n' "$ALLOW" >&2
   exit 1
 fi
-printf 'no-secrets: личных данных в отслеживаемых файлах нет — порядок.\n'
+printf 'no-secrets: личных данных в файлах репозитория нет — порядок.\n'
