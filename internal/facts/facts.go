@@ -1,0 +1,428 @@
+// Package facts собирает то, что keel знает о хосте. Только чтение:
+// ничего в этом пакете систему не меняет, поэтому его свободно вызывают
+// и сборка плана, и проверка, и doctor.
+//
+// Там, где можно прочитать файл вместо запуска команды, читается файл:
+// так факты собираются и на хосте с остановленными службами, и в тестах
+// через KEEL_FS_ROOT.
+package facts
+
+import (
+	"bufio"
+	"context"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/vshivtsev-dev/keel/internal/exec"
+	"github.com/vshivtsev-dev/keel/internal/paths"
+	"github.com/vshivtsev-dev/keel/internal/plan"
+)
+
+type Facts struct {
+	Hostname string
+
+	IsPVE      bool
+	PVEVersion string
+	PVEMajor   int
+	Codename   string
+	RepoStyle  string // deb822 | list
+	Bootloader string
+
+	CPUVendor string
+	CPUModel  string
+	IOMMU     bool
+
+	GPUs     []GPU
+	DRINodes []string
+
+	Bridges  []string
+	Storages []Storage
+	Guests   []Guest
+
+	Upgradable int
+}
+
+type GPU struct {
+	Address string
+	Desc    string
+	Driver  string
+}
+
+type Storage struct {
+	Name    string
+	Type    string
+	Path    string
+	Content []string
+}
+
+func (s Storage) HasContent(t string) bool {
+	for _, c := range s.Content {
+		if c == t {
+			return true
+		}
+	}
+	return false
+}
+
+type Guest struct {
+	ID   int
+	Kind string // vm | lxc
+	Name string
+}
+
+// Collect собирает факты о хосте. Ошибка отдельного источника не обрывает
+// сбор: неизвестный факт — это «не знаю», а не повод остаться без отчёта
+// на полумёртвой системе, ради которой keel и существует.
+func Collect(ctx context.Context, p paths.Paths, c exec.Capturer) *Facts {
+	f := &Facts{}
+	f.Hostname, _ = os.Hostname()
+
+	f.collectPVE(ctx, p, c)
+	f.collectCPU(p)
+	f.collectGPU(ctx, p, c)
+	f.collectStorages(p)
+	f.collectGuests(p)
+	f.collectBridges(ctx, c)
+	f.collectAPT(ctx, c)
+	return f
+}
+
+func (f *Facts) collectPVE(ctx context.Context, p paths.Paths, c exec.Capturer) {
+	_, err := os.Stat(p.Sys("/etc/pve/.version"))
+	f.IsPVE = err == nil || c.Has("pveversion")
+
+	if c.Has("pveversion") {
+		if out, err := c.Capture(ctx, "pveversion"); err == nil {
+			f.PVEVersion = firstLine(out)
+			f.PVEMajor = pveMajor(f.PVEVersion)
+		}
+	}
+	f.Codename = osReleaseField(p.Sys("/etc/os-release"), "VERSION_CODENAME")
+	f.RepoStyle = repoStyle(p, f.PVEMajor)
+	f.Bootloader = bootloader(ctx, p, c)
+}
+
+// pveMajor достаёт мажорную версию из строки вида "pve-manager/9.0.3/...".
+func pveMajor(line string) int {
+	i := strings.Index(line, "pve-manager/")
+	if i < 0 {
+		return 0
+	}
+	rest := line[i+len("pve-manager/"):]
+	dot := strings.IndexByte(rest, '.')
+	if dot < 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(rest[:dot])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// repoStyle: deb822 (*.sources, PVE 9 / Debian 13) или list (*.list, PVE 8).
+func repoStyle(p paths.Paths, major int) string {
+	dir := p.Sys("/etc/apt/sources.list.d")
+	if globAny(filepath.Join(dir, "*.sources")) {
+		return "deb822"
+	}
+	if globAny(filepath.Join(dir, "*.list")) {
+		return "list"
+	}
+	if major >= 9 {
+		return "deb822"
+	}
+	return "list"
+}
+
+// bootloader важен для проброса видеокарты: на ZFS хост грузится
+// systemd-boot, и правка /etc/default/grub там не делает ничего.
+func bootloader(ctx context.Context, p paths.Paths, c exec.Capturer) string {
+	if c.Has("proxmox-boot-tool") {
+		if out, err := c.Capture(ctx, "proxmox-boot-tool", "status"); err == nil {
+			if strings.Contains(strings.ToLower(out), "systemd-boot") {
+				return "systemd-boot (через proxmox-boot-tool)"
+			}
+			return "grub (через proxmox-boot-tool)"
+		}
+	}
+	if _, err := os.Stat(p.Sys("/etc/default/grub")); err == nil {
+		return "grub"
+	}
+	return "неизвестно"
+}
+
+func (f *Facts) collectCPU(p paths.Paths) {
+	raw, err := os.ReadFile(p.Sys("/proc/cpuinfo"))
+	if err == nil {
+		text := string(raw)
+		switch {
+		case strings.Contains(text, "AuthenticAMD"):
+			f.CPUVendor = "AMD"
+		case strings.Contains(text, "GenuineIntel"):
+			f.CPUVendor = "Intel"
+		default:
+			f.CPUVendor = "неизвестно"
+		}
+		f.CPUModel = fieldAfterColon(text, "model name")
+	}
+	f.IOMMU = globAny(filepath.Join(p.Sys("/sys/class/iommu"), "*"))
+}
+
+func (f *Facts) collectGPU(ctx context.Context, p paths.Paths, c exec.Capturer) {
+	if c.Has("lspci") {
+		out, err := c.Capture(ctx, "lspci", "-mm")
+		if err == nil {
+			for _, line := range strings.Split(out, "\n") {
+				if !isDisplayDevice(line) {
+					continue
+				}
+				addr, desc := splitAddr(strings.ReplaceAll(line, `"`, ""))
+				if addr == "" {
+					continue
+				}
+				g := GPU{Address: addr, Desc: desc, Driver: "нет"}
+				if kout, err := c.Capture(ctx, "lspci", "-k", "-s", addr); err == nil {
+					if drv := fieldAfterColon(kout, "Kernel driver in use"); drv != "" {
+						g.Driver = drv
+					}
+				}
+				f.GPUs = append(f.GPUs, g)
+			}
+		}
+	}
+	// by-path и by-id — каталоги со ссылками, устройствами они не являются.
+	for _, n := range glob(filepath.Join(p.Sys("/dev/dri"), "*")) {
+		if st, err := os.Stat(n); err == nil && st.IsDir() {
+			continue
+		}
+		f.DRINodes = append(f.DRINodes, n)
+	}
+}
+
+func isDisplayDevice(line string) bool {
+	l := strings.ToLower(line)
+	return strings.Contains(l, "vga compatible") ||
+		strings.Contains(l, "display controller") ||
+		strings.Contains(l, "3d controller")
+}
+
+func splitAddr(line string) (addr, desc string) {
+	line = strings.TrimSpace(line)
+	i := strings.IndexByte(line, ' ')
+	if i < 0 {
+		return "", ""
+	}
+	return line[:i], strings.TrimSpace(line[i+1:])
+}
+
+// collectStorages читает /etc/pve/storage.cfg. Формат: строка «тип: имя»,
+// под ней поля с отступом.
+func (f *Facts) collectStorages(p paths.Paths) {
+	file, err := os.Open(p.Sys("/etc/pve/storage.cfg"))
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	var cur *Storage
+	flush := func() {
+		if cur != nil {
+			f.Storages = append(f.Storages, *cur)
+			cur = nil
+		}
+	}
+	sc := bufio.NewScanner(file)
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			flush()
+			typ, name, ok := strings.Cut(line, ":")
+			if !ok {
+				continue
+			}
+			cur = &Storage{Type: strings.TrimSpace(typ), Name: strings.TrimSpace(name)}
+			continue
+		}
+		if cur == nil {
+			continue
+		}
+		key, val, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok {
+			continue
+		}
+		val = strings.TrimSpace(val)
+		switch key {
+		case "path":
+			cur.Path = val
+		case "content":
+			cur.Content = splitSorted(val)
+		}
+	}
+	flush()
+}
+
+// collectGuests читает конфиги гостей, а не спрашивает qm/pct: так список
+// собирается и когда службы Proxmox не подняты.
+func (f *Facts) collectGuests(p paths.Paths) {
+	for _, src := range []struct {
+		dir, kind, nameKey string
+	}{
+		{p.Sys("/etc/pve/qemu-server"), "vm", "name"},
+		{p.Sys("/etc/pve/lxc"), "lxc", "hostname"},
+	} {
+		for _, conf := range glob(filepath.Join(src.dir, "*.conf")) {
+			base := strings.TrimSuffix(filepath.Base(conf), ".conf")
+			id, err := strconv.Atoi(base)
+			if err != nil {
+				continue
+			}
+			g := Guest{ID: id, Kind: src.kind}
+			if raw, err := os.ReadFile(conf); err == nil {
+				g.Name = fieldAfterColon(string(raw), src.nameKey)
+			}
+			f.Guests = append(f.Guests, g)
+		}
+	}
+	sort.Slice(f.Guests, func(i, j int) bool { return f.Guests[i].ID < f.Guests[j].ID })
+}
+
+func (f *Facts) collectBridges(ctx context.Context, c exec.Capturer) {
+	if !c.Has("ip") {
+		return
+	}
+	out, err := c.Capture(ctx, "ip", "-o", "link", "show", "type", "bridge")
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(out, "\n") {
+		_, rest, ok := strings.Cut(line, ": ")
+		if !ok {
+			continue
+		}
+		if name, _, ok := strings.Cut(rest, ":"); ok {
+			f.Bridges = append(f.Bridges, strings.TrimSpace(name))
+		}
+	}
+}
+
+// collectAPT только моделирует обновление (-s) и ничего не ставит.
+func (f *Facts) collectAPT(ctx context.Context, c exec.Capturer) {
+	if !c.Has("apt-get") {
+		return
+	}
+	out, err := c.Capture(ctx, "apt-get", "-s", "dist-upgrade")
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "Inst ") {
+			f.Upgradable++
+		}
+	}
+}
+
+// Storage находит хранилище по имени.
+func (f *Facts) Storage(name string) *Storage {
+	for i := range f.Storages {
+		if f.Storages[i].Name == name {
+			return &f.Storages[i]
+		}
+	}
+	return nil
+}
+
+// GuestExists — есть ли на хосте гость с таким id. Гостя, который есть,
+// keel не трогает никогда.
+func (f *Facts) GuestExists(id int) bool {
+	for _, g := range f.Guests {
+		if g.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// Digest — отпечаток тех фактов, от которых зависит план. Если он разошёлся,
+// значит хост изменился и сохранённый план устарел.
+func (f *Facts) Digest() string {
+	var parts []string
+	parts = append(parts, f.Hostname, f.PVEVersion, f.RepoStyle, f.Bootloader,
+		strconv.FormatBool(f.IOMMU), strconv.Itoa(f.Upgradable))
+	for _, s := range f.Storages {
+		parts = append(parts, "storage:"+s.Name+":"+s.Type+":"+strings.Join(s.Content, ","))
+	}
+	for _, g := range f.Guests {
+		parts = append(parts, "guest:"+strconv.Itoa(g.ID)+":"+g.Kind)
+	}
+	for _, g := range f.GPUs {
+		parts = append(parts, "gpu:"+g.Address+":"+g.Driver)
+	}
+	return plan.Digest(parts...)
+}
+
+// --- мелкая помощь -----------------------------------------------------------
+
+func splitSorted(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return strings.TrimSpace(s)
+}
+
+// fieldAfterColon берёт значение первой строки вида «ключ: значение».
+func fieldAfterColon(text, key string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		rest, ok := strings.CutPrefix(line, key)
+		if !ok {
+			continue
+		}
+		rest = strings.TrimSpace(rest)
+		if v, ok := strings.CutPrefix(rest, ":"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func osReleaseField(path, key string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), key+"="); ok {
+			return strings.Trim(v, `"`)
+		}
+	}
+	return ""
+}
+
+func glob(pattern string) []string {
+	m, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil
+	}
+	sort.Strings(m)
+	return m
+}
+
+func globAny(pattern string) bool { return len(glob(pattern)) > 0 }

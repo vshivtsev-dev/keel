@@ -1,0 +1,30 @@
+# Один файл на всё: сборка keel и раздача готовых бинарников.
+#
+#   docker compose up --build     собрать и поднять раздачу локально
+#   curl -fsS localhost:8080/checksums.txt
+#
+# В Dokploy этот же файл разворачивается как Compose-приложение. Домен и
+# сертификат выдаёт Traefik, который там уже стоит, поэтому меток Traefik
+# здесь нет: дублировать чужую настройку — верный способ развести их врозь.
+
+services:
+  dist:
+    build:
+      context: .
+      dockerfile: build/Dockerfile
+      target: dist
+      args:
+        VERSION: ${KEEL_VERSION:-dev}
+    image: keel-dist:${KEEL_VERSION:-dev}
+    restart: unless-stopped
+    expose:
+      - "80"
+    ports:
+      # Только для локальной проверки. В Dokploy наружу выводит Traefik.
+      - "${KEEL_DIST_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

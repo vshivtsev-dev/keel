@@ -7,3 +7,7 @@ manifest/host.json
 .keel-cache/
 *.log
 *.tmp
+
+# Сборка Go: бинарники собираются в контейнере и в репозиторий не кладутся
+/keel
+/dist/
