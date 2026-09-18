@@ -65,12 +65,25 @@ func Apply(ctx context.Context, a *App, planPath string) error {
 		runner.Confirm = askAboutStep(a)
 	}
 
+	// Точка невозврата: дальше устройство уедет от хоста.
+	if a.Opts.Mode != ModeDry {
+		if err := a.confirmBlackout(m, f); err != nil {
+			return err
+		}
+	}
+
 	s.section("Применение")
 	if a.Paths.Sandboxed() {
 		s.warn("песочница", "KEEL_FS_ROOT="+a.Paths.FSRoot()+" — файлы уводятся в сторону, команды не выполняются")
 	}
 	rep := engine.Apply(ctx, runner, p)
 	report(a, s, rep)
+
+	if a.Opts.Mode != ModeDry {
+		if err := a.recordGPUState(m, f, rep, runner.Stamp); err != nil {
+			s.warn("запись о пробросе", err.Error())
+		}
+	}
 
 	switch {
 	case rep.Aborted:

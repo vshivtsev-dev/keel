@@ -76,6 +76,9 @@ func Registry(p paths.Paths, only map[int]bool) *provider.Registry {
 			CacheDir: filepath.Join(p.Home(), "images"),
 		},
 		host.Backup{},
+		// Проброс видеокарты идёт после гостей: отдавать карту
+		// несуществующей ВМ нечему.
+		host.GPU{Paths: p, Capturer: exec.System{}},
 		host.ConfigBackup{},
 	)
 }

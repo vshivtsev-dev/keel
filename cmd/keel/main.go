@@ -32,6 +32,8 @@ const usage = `keel — сборка и восстановление хоста 
   plan        собрать план изменений и сохранить его файлом
   apply [ФАЙЛ] применить план (без аргумента — последний собранный)
   verify      сверить хост с манифестом
+  gpu revert  откатить проброс видеокарты
+  gpu status  что записано о пробросе
   validate    проверить манифест на ошибки
   version     версия
   help        эта справка
@@ -160,7 +162,16 @@ func run(argv []string) error {
 		return cli.Apply(ctx, app, planArg)
 	case "verify":
 		return cli.Verify(ctx, app)
-	case "menu", "guests", "password", "token", "gpu", "external", "logs", "backup":
+	case "gpu":
+		switch planArg {
+		case "revert":
+			return cli.GPURevert(ctx, app)
+		case "status", "":
+			return cli.GPUStatus(app)
+		default:
+			return fmt.Errorf("keel gpu revert — откатить проброс; keel gpu status — что записано")
+		}
+	case "menu", "guests", "password", "token", "external", "logs", "backup":
 		return fmt.Errorf("команда %q ещё не перенесена на Go — пока пользуйся bash-версией: %s/bin/keel %s",
 			cmd, bashHome(), cmd)
 	default:
