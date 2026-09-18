@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>keel</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="bar">
+  <span class="brand">keel</span>
+  <span class="sep">·</span>
+  <span id="host">…</span>
+  <span class="sep">·</span>
+  <span id="version" class="dim">…</span>
+  <span class="grow"></span>
+  <span id="state" class="state">готов</span>
+</header>
+
+<nav class="tabs">
+  <button data-run="plan"   class="tab">План</button>
+  <button data-run="verify" class="tab">Проверка</button>
+  <button data-run="doctor" class="tab">Состояние</button>
+  <button data-run="guests" class="tab">Гости</button>
+  <span class="grow"></span>
+  <button id="apply" class="tab danger" disabled>Применить план</button>
+  <button id="stop"  class="tab" hidden>Остановить чтение</button>
+</nav>
+
+<main>
+  <pre id="log" class="log"><span class="dim">Нажми «План» — keel покажет, что изменится. Ничего при этом не выполняется.</span></pre>
+</main>
+
+<footer class="foot">
+  <span id="hint" class="dim">Применение доступно после просмотра плана.</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -41,6 +41,8 @@ source "${KEEL_ROOT}/lib/modules.sh"
 source "${KEEL_ROOT}/lib/doctor.sh"
 # shellcheck source=../lib/external.sh
 source "${KEEL_ROOT}/lib/external.sh"
+# shellcheck source=../lib/web.sh
+source "${KEEL_ROOT}/lib/web.sh"
 
 # Манифест лежит рядом с остальным твоим — в KEEL_HOME, а не среди кода:
 # обновление keel перезаписывает app/ целиком и до манифеста не дотягивается.
@@ -66,6 +68,7 @@ keel — сборка и восстановление хоста Proxmox VE.
   password ID показать пароль, сгенерированный для гостя
   token [ИМЯ] показать сохранённый токен (по умолчанию cloudflared)
   guests      список гостей из манифеста и их состояние
+  web         тот же план и то же применение, но в браузере
   external    внешние инструменты (community-scripts)
   modules     список модулей
   logs        показать последний лог
@@ -82,6 +85,8 @@ keel — сборка и восстановление хоста Proxmox VE.
                    (в меню то же самое — галочками)
   --manifest PATH  другой файл манифеста
   --plain          без цвета (для логов, вывода в файл и монохромных консолей)
+  --listen ADDR    для keel web: кого слушать (по умолчанию 127.0.0.1)
+  --port N         для keel web: порт (по умолчанию 8777)
 
 Порядок, который экономит нервы:
   keel doctor  →  keel plan  →  keel apply
@@ -100,6 +105,10 @@ parse_args() {
       --only)     shift; KEEL_ONLY=${1:-} ;;
       --guest)    shift; KEEL_GUESTS_ONLY="${KEEL_GUESTS_ONLY:+${KEEL_GUESTS_ONLY},}${1:-}" ;;
       --manifest) shift; KEEL_MANIFEST=${1:-} ;;
+      # Флаги keel web разбираются здесь же, а не внутри команды: иначе
+      # общий разбор споткнулся бы о них как о неизвестных
+      --listen)   shift; KEEL_WEB_LISTEN=${1:-} ;;
+      --port)     shift; KEEL_WEB_PORT=${1:-} ;;
       -h|--help)  usage; exit 0 ;;
       --*)        die "Неизвестный флаг: $1 (см. keel help)" ;;
       *)          positional+=("$1") ;;
@@ -331,6 +340,7 @@ main() {
     password) show_password "${KEEL_ARGV[1]:-}" ;;
     token)    show_token "${KEEL_ARGV[1]:-}" ;;
     guests)   show_guests ;;
+    web)      web_command ;;
     external) need_root; external_menu ;;
     modules)  modules_list_ids | column -t -s $'\t' 2>/dev/null || modules_list_ids ;;
     logs)     if [[ -f "$KEEL_LOG_FILE" ]]; then cat "$KEEL_LOG_FILE"; fi ;;

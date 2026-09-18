@@ -1,0 +1,119 @@
+/* keel :: веб-интерфейс
+ *
+ * Плотно и без заливок. Ровно та же мысль, что и в терминале: место на
+ * экране принадлежит выводу keel, а не оформлению вокруг него. Поэтому
+ * полосы по краям тонкие, отступы мелкие, а лог занимает всю оставшуюся
+ * высоту и ширину.
+ */
+
+:root {
+  --bg:      #14161a;
+  --panel:   #1b1e24;
+  --line:    #2a2f38;
+  --text:    #d7dae0;
+  --dim:     #7d8592;
+  --blue:    #6aa9e9;
+  --green:   #6cc08b;
+  --yellow:  #d8ae5a;
+  --red:     #e0736d;
+  --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.5 var(--mono);
+}
+
+/* --- Полосы сверху и снизу ------------------------------------------------ */
+
+.bar, .tabs, .foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.foot {
+  border-bottom: none;
+  border-top: 1px solid var(--line);
+}
+
+.brand { font-weight: 700; }
+.sep   { color: var(--line); }
+.dim   { color: var(--dim); }
+.grow  { flex: 1; }
+
+.state { color: var(--dim); }
+.state.busy { color: var(--yellow); }
+.state.done { color: var(--green); }
+.state.fail { color: var(--red); }
+
+/* --- Кнопки --------------------------------------------------------------- */
+
+.tab {
+  font: inherit;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.tab:hover:not(:disabled) { border-color: var(--dim); }
+
+.tab:disabled {
+  color: var(--dim);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.tab.active { border-color: var(--blue); color: var(--blue); }
+
+.tab.danger:not(:disabled) { border-color: var(--red); color: var(--red); }
+
+/* --- Лог ------------------------------------------------------------------ */
+
+main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.log {
+  flex: 1;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+}
+
+/* Разметка строк по тем же значкам, которыми keel размечает вывод в
+ * терминале. Второго источника правды нет: цвет здесь — это прочтение
+ * того, что keel и так сказал текстом. */
+.l-run    { color: var(--blue); }
+.l-ok     { color: var(--green); }
+.l-warn   { color: var(--yellow); }
+.l-err    { color: var(--red); }
+.l-skip   { color: var(--dim); }
+.l-head   { color: var(--text); font-weight: 700; }
+.l-detail { color: var(--dim); }
+
+@media (max-width: 600px) {
+  .tabs { flex-wrap: wrap; }
+  .grow { flex-basis: 100%; }
+}

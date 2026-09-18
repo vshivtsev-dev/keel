@@ -1409,6 +1409,112 @@ test_storage_keeps_content_types_it_did_not_add() {
 # Глобальный IFS — общий корень четырёх поломок сразу: он ломает "${массив[*]}"
 # и словоделение по пробелам, от списка пакетов до выбора модулей в меню.
 # Кавычки в проекте расставлены, отдельный IFS не нужен ни одной строке.
+# --- Веб-интерфейс -----------------------------------------------------------
+#
+# Разбор запроса проверяется без сокета: функции лежат в пакете Keel::Web,
+# а сам файл при require ничего не запускает. Сеть в тестах — отдельная
+# проверка ниже, и она одна; всё остальное проверяется строками.
+
+# Вызвать функцию из lib/web.pl и напечатать результат
+_web_perl() {
+  perl -e '
+    require "'"${KEEL_ROOT}"'/lib/web.pl";
+    '"$1"'
+  ' 2>&1
+}
+
+test_web_parses_request_line() {
+  local out
+  out=$(_web_perl '
+    my $r = Keel::Web::parse_request("GET /api/plan?only=host%2F10-repos&t=abc HTTP/1.1\r\nHost: x\r\nX-Keel-Token: zzz\r\n\r\n");
+    printf "%s|%s|%s|%s\n", $r->{method}, $r->{path}, $r->{query}{only}, $r->{headers}{"x-keel-token"};
+  ')
+  assert_eq "$out" 'GET|/api/plan|host/10-repos|zzz' "метод, путь, раскодированный параметр и заголовок"
+}
+
+test_web_rejects_junk() {
+  local out
+  out=$(_web_perl '
+    for my $junk ("", "не запрос вовсе", "GET /\r\n", "GET / HTTP/9.9\r\n\r\n") {
+      print defined(Keel::Web::parse_request($junk)) ? "принял" : "отверг";
+      print " ";
+    }
+    print "\n";
+  ')
+  assert_eq "$out" "отверг отверг отверг отверг " "мусор не должен разбираться как запрос"
+}
+
+# Токен проверяется целиком, а не по префиксу, и пустой не подходит никогда
+test_web_token_is_all_or_nothing() {
+  local out
+  out=$(_web_perl '
+    $Keel::Web::TOKEN = "секрет-целиком";
+    my @try = ("секрет-целиком", "секрет", "", "секрет-целикомX");
+    print join(" ", map { Keel::Web::token_ok($_) ? "да" : "нет" } @try), "\n";
+  ')
+  assert_eq "$out" "да нет нет нет" "подходит только точное совпадение"
+}
+
+# Идентификатор модуля и список гостей приходят снаружи и попадают в
+# аргументы keel. Проверяются по белому списку, а не чистятся.
+test_web_validates_parameters() {
+  local out
+  out=$(_web_perl '
+    my @only = ("host/10-repos", "host/10-repos; rm -rf /", "../../etc/passwd", "", "a b");
+    print join("|", map { Keel::Web::safe_only($_) } @only), "\n";
+    my @g = ("200", "200,201", "200; ls", "abc");
+    print join("|", map { Keel::Web::safe_guests($_) } @g), "\n";
+  ')
+  assert_eq "$(printf '%s' "$out" | head -1)" 'host/10-repos||||' "пропускается только настоящий id модуля"
+  assert_eq "$(printf '%s' "$out" | tail -1)" '200|200,201||'     "пропускаются только номера через запятую"
+}
+
+test_web_reads_cookie() {
+  local out
+  out=$(_web_perl '
+    my $r = { headers => { cookie => "other=1; keel=секрет; last=2" } };
+    printf "%s|%s\n", Keel::Web::cookie_of($r, "keel"), (Keel::Web::cookie_of($r, "нет") // "-");
+  ')
+  assert_eq "$out" 'секрет|-' "кука находится среди прочих, отсутствующая — не выдумывается"
+}
+
+# Единственная проверка с настоящим сокетом. Без неё всё вышеперечисленное
+# могло бы работать, а сервер — не подниматься вовсе.
+test_web_server_answers_over_http() {
+  command -v curl >/dev/null 2>&1 || { note "curl нет, живая проверка пропущена"; return 0; }
+
+  local log="${T}/web.log" port
+  # Порт 0 — «любой свободный»: два теста подряд не подерутся за номер
+  perl "${KEEL_ROOT}/lib/web.pl" --root "$KEEL_ROOT" --home "$T" \
+       --token ТЕСТ --port 0 >"$log" 2>&1 &
+  local pid=$!
+  # shellcheck disable=SC2064  # pid подставляется сейчас, это и нужно
+  trap "kill $pid 2>/dev/null" RETURN
+
+  local i
+  for (( i = 0; i < 50; i++ )); do
+    port=$(awk '/^READY/ {print $3}' "$log" 2>/dev/null)
+    [[ -n "$port" ]] && break
+    sleep 0.1
+  done
+  [[ -n "$port" ]] || fail "сервер не сказал READY: $(cat "$log")"
+
+  local code
+  code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${port}/")
+  assert_eq "$code" "401" "без токена страница не отдаётся"
+
+  code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${port}/?t=ТЕСТ")
+  assert_eq "$code" "200" "с токеном страница отдаётся"
+
+  code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${port}/api/apply?t=ТЕСТ")
+  assert_eq "$code" "405" "применение только POST"
+
+  # Сервер обязан пережить предыдущие соединения: обработчик SIGCHLD
+  # прерывает accept, и наивный цикл здесь уже был бы мёртв
+  code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${port}/api/state?t=ТЕСТ")
+  assert_eq "$code" "200" "сервер жив после нескольких запросов"
+}
+
 test_no_global_ifs() {
   local hits
   hits=$(grep -rn '^[[:space:]]*IFS=' bin/ lib/ modules/ 2>/dev/null \
@@ -1961,6 +2067,14 @@ it "cli: пример манифеста проходит проверку"    t
 it "cli: неизвестная команда — ошибка"          test_cli_rejects_unknown_command
 it "cli: говорит, когда пароля нет"             test_cli_password_says_when_there_is_none
 it "cli: apply отказывается вне Proxmox"        test_cli_apply_refuses_on_non_proxmox
+
+printf '\nВеб-интерфейс\n'
+it "web: разбирает строку запроса"              test_web_parses_request_line
+it "web: мусор запросом не считает"             test_web_rejects_junk
+it "web: токен целиком или никак"               test_web_token_is_all_or_nothing
+it "web: параметры по белому списку"            test_web_validates_parameters
+it "web: находит куку среди прочих"             test_web_reads_cookie
+it "web: сервер отвечает по-настоящему"         test_web_server_answers_over_http
 
 printf '\nСтатические проверки\n'
 it "статика: глобального IFS нет"               test_no_global_ifs
