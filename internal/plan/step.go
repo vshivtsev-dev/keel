@@ -73,3 +73,23 @@ type Finding struct {
 	// не трогает никогда, только рассказывает.
 	Unmanaged bool `json:"unmanaged,omitempty"`
 }
+
+// Note — то, что keel заметил, но сделать не может: не хватает данных в
+// манифесте или действие слишком опасно, чтобы решать за человека.
+//
+// Это не шаг и не ошибка. Модуль хранилищ в bash-версии печатал такие
+// случаи прямо в mod_check и считал их изменением — из-за чего план
+// обещал то, чего применение не делало. Здесь они видны отдельно и
+// честно: keel про это знает и ждёт решения.
+type Note struct {
+	Resource string `json:"resource"`
+	Message  string `json:"message"`
+}
+
+// Changes — всё, что провайдер может сказать о состоянии своей области.
+type Changes struct {
+	Steps []Step `json:"steps,omitempty"`
+	Notes []Note `json:"notes,omitempty"`
+}
+
+func (c Changes) Empty() bool { return len(c.Steps) == 0 && len(c.Notes) == 0 }

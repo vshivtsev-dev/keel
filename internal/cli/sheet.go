@@ -61,6 +61,24 @@ func (s *sheet) warn(label, value string) {
 	fmt.Fprintf(s.w, "  %s %s %s\n", s.paint("33", "!"), pad(label, labelWidth-2), value)
 }
 
+func (s *sheet) change(label, value string) {
+	fmt.Fprintf(s.w, "  %s %s %s\n", s.paint("34", "→"), pad(label, labelWidth-2), value)
+}
+
+// skip — правило нуля: в манифесте про эту область ничего не сказано.
+// Значок нарочно неприметный: это не проблема, а норма.
+func (s *sheet) skip(label, value string) {
+	fmt.Fprintf(s.w, "  %s %s %s\n", s.paint("2", "·"), pad(label, labelWidth-2), s.paint("2", value))
+}
+
+func (s *sheet) bad(label, value string) {
+	fmt.Fprintf(s.w, "  %s %s %s\n", s.paint("31", "✗"), pad(label, labelWidth-2), value)
+}
+
+func (s *sheet) indent(text string) {
+	fmt.Fprintf(s.w, "      %s\n", text)
+}
+
 func (s *sheet) note(text string) {
 	fmt.Fprintf(s.w, "  %s\n", s.paint("2", text))
 }
