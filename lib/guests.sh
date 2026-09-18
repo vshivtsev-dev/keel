@@ -312,7 +312,7 @@ guest_password() {
   fi
 
   local pw=""
-  if [[ "$KEEL_MODE" == "step" ]]; then
+  if keel_interactive; then
     pw=$(ui_password "Пароль для ${name}" \
       "Пароль пользователя внутри гостя ${id} (${name}).
 Пусто — сгенерирую случайный и сохраню в ${secret_file}")
@@ -354,7 +354,7 @@ guest_token() {
   fi
 
   local tok=""
-  if [[ "$KEEL_MODE" == "step" ]]; then
+  if keel_interactive; then
     tok=$(ui_password "Токен для ${name}" "$(prof_get token_hint "Токен внешнего сервиса.
 Сохраню в ${token_file}, в манифест он не попадёт.")")
     tok=$(printf '%s' "$tok" | tr -d '[:space:]')

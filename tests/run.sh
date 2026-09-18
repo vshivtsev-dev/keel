@@ -308,6 +308,67 @@ test_core_run_write_makes_backup() {
   assert_eq "$(cat "$found")" "было" "в копии должно лежать прежнее содержимое"
 }
 
+# --- Одно согласие на весь план ----------------------------------------------
+#
+# Обещание режима once — спросить один раз. Проверяется с двух сторон: после
+# согласия никто больше не спрашивает, а без согласия никто ничего не делает.
+# Стрелять в ногу здесь можно ровно двумя способами, и оба ниже.
+
+test_core_once_asks_nothing_after_plan_confirmed() {
+  export KEEL_MODE="once"
+  KEEL_CONFIRMED=1
+  # Вызов этой заглушки и есть провал: о шаге спрашивать уже не должны
+  ui_confirm_step() { : >"${T}/спросили"; printf 'abort'; }
+
+  run "создать файл" touch "${T}/создан" >/dev/null
+  [[ ! -e "${T}/спросили" ]] || fail "план подтверждён, а keel всё равно спросил о шаге"
+  [[ -e "${T}/создан" ]] || fail "после согласия на план команда должна выполниться"
+}
+
+test_core_once_without_confirmation_still_asks() {
+  export KEEL_MODE="once"
+  KEEL_CONFIRMED=0
+  # Заглушка пишет файл, а не переменную: run() зовёт её в подстановке, то есть
+  # в подоболочке, и присваивание оттуда до теста не доживает
+  ui_confirm_step() { : >"${T}/спросили"; printf 'skip'; }
+
+  # stderr тоже в /dev/null: «Пропущено» — ожидаемый здесь ответ, и в отчёте
+  # о тестах ему делать нечего
+  run "создать файл" touch "${T}/не-должен-появиться" >/dev/null 2>&1
+  [[ -e "${T}/спросили" ]] || fail "без подтверждения плана run() обязан спросить"
+  [[ ! -e "${T}/не-должен-появиться" ]] || fail "ответ был skip, а команда выполнилась"
+}
+
+# Пустой ответ в пошаговом режиме значит «применить». Если /dev/tty не
+# открывается, read оставляет ответ пустым — и без проверки keel применял бы
+# всё подряд, не спросив ни разу. Ровно этот случай: контейнер, systemd, nohup.
+test_core_step_without_terminal_aborts() {
+  export KEEL_MODE="step"
+  keel_have_tty() { return 1; }
+
+  local rc=0
+  ( run "создать файл" touch "${T}/не-должен-появиться" ) >/dev/null 2>&1 || rc=$?
+  assert_rc 3 "$rc" "без терминала пошаговый режим обязан прерваться"
+  [[ ! -e "${T}/не-должен-появиться" ]] || fail "без терминала команда выполнилась молча"
+}
+
+test_ui_confirm_plan_without_terminal_cancels() {
+  keel_have_tty() { return 1; }
+  assert_eq "$(ui_confirm_plan 2>/dev/null)" "cancel" \
+    "без терминала — отказ, а не молчаливое согласие"
+}
+
+test_core_interactive_only_when_it_may_ask() {
+  keel_have_tty() { return 0; }
+  KEEL_MODE="once"; keel_interactive || fail "в режиме once спрашивать можно"
+  KEEL_MODE="step"; keel_interactive || fail "в пошаговом режиме спрашивать можно"
+  KEEL_MODE="yes";  ! keel_interactive || fail "при --yes спрашивать нельзя"
+  KEEL_MODE="dry";  ! keel_interactive || fail "в режиме просмотра спрашивать не о чем"
+
+  KEEL_MODE="once"; keel_have_tty() { return 1; }
+  ! keel_interactive || fail "без терминала спрашивать не у кого"
+}
+
 # --- Модуль репозиториев -----------------------------------------------------
 
 # Заготовка «свежеустановленного хоста» в новом формате (PVE 9)
@@ -901,6 +962,62 @@ test_modules_run_in_numeric_order() {
   order=$(modules_list_ids | cut -f1 | paste -sd' ' -)
   assert_eq "$order" \
     "host/10-repos host/20-updates host/30-storage host/40-backup-jobs guests/50-guests host/60-gpu-passthrough host/90-config-backup"
+}
+
+# Хост с манифестом, где ровно одному модулю есть что делать
+_host_with_one_change() {
+  _fake_host_deb822
+  printf '{ "host": { "repos": "no-subscription" } }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="once"
+}
+
+_repos_file_written() {
+  [[ -f "${KEEL_FS_ROOT}/etc/apt/sources.list.d/pve-no-subscription.sources" ]]
+}
+
+# «Нет» на плане значит «нет»: ни одного изменения на диске.
+test_apply_cancelled_plan_touches_nothing() {
+  _host_with_one_change
+  ui_confirm_plan() { printf 'cancel'; }
+
+  modules_apply host/10-repos >/dev/null 2>&1
+  ! _repos_file_written || fail "после отказа от плана репозиторий всё равно записан"
+}
+
+# Ради чего всё затевалось: одно «да» — и дальше ни одного вопроса.
+test_apply_one_confirmation_covers_the_whole_plan() {
+  _host_with_one_change
+  ui_confirm_plan() { printf 'apply'; }
+  ui_confirm_step() { : >"${T}/спросили-о-шаге"; printf 'abort'; }
+
+  modules_apply host/10-repos >/dev/null 2>&1
+  [[ ! -e "${T}/спросили-о-шаге" ]] || fail "план подтверждён, а keel спросил ещё раз"
+  _repos_file_written || fail "план подтверждён, а репозиторий не записан"
+}
+
+# Согласие живёт один прогон. Иначе второй «применить» из меню выполнился бы
+# молча, опираясь на «да», сказанное совсем другому списку.
+test_apply_confirmation_does_not_outlive_the_run() {
+  _host_with_one_change
+  ui_confirm_plan() { printf 'apply'; }
+
+  modules_apply host/10-repos >/dev/null 2>&1
+  assert_eq "$KEEL_CONFIRMED" "0" "согласие обязано сбрасываться после применения"
+  assert_eq "$KEEL_MODE" "once" "режим обязан возвращаться после выбора «по шагам»"
+}
+
+# Менять нечего — вопроса быть не должно: спрашивать не о чем.
+test_apply_asks_nothing_when_there_is_nothing_to_do() {
+  _fake_host_deb822
+  printf '{ "host": { "updates": false } }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="once"
+  ui_confirm_plan() { : >"${T}/спросили-о-плане"; printf 'cancel'; }
+
+  local out; out=$(modules_apply host/10-repos 2>&1)
+  [[ ! -e "${T}/спросили-о-плане" ]] || fail "изменений нет, а keel всё равно спросил"
+  assert_contains "$out" "Менять нечего"
 }
 
 
@@ -1724,6 +1841,17 @@ it "core: run_write идемпотентен"               test_core_run_write_
 it "core: run_write делает резервную копию"     test_core_run_write_makes_backup
 it "core: все пути внутри KEEL_HOME"            test_paths_all_live_under_home
 it "ui: длинный diff обрезается для экрана"     test_confirm_clips_long_body
+
+printf '\nСогласие: один вопрос вместо полусотни\n'
+it "once: после согласия на план вопросов нет"  test_core_once_asks_nothing_after_plan_confirmed
+it "once: без согласия ничего не выполняется"   test_core_once_without_confirmation_still_asks
+it "step: без терминала — отказ, а не тишина"   test_core_step_without_terminal_aborts
+it "план: без терминала вопрос отменяется"      test_ui_confirm_plan_without_terminal_cancels
+it "core: спрашиваем только когда можно"        test_core_interactive_only_when_it_may_ask
+it "apply: отказ от плана ничего не трогает"    test_apply_cancelled_plan_touches_nothing
+it "apply: одно согласие на весь план"          test_apply_one_confirmation_covers_the_whole_plan
+it "apply: согласие не переживает прогон"       test_apply_confirmation_does_not_outlive_the_run
+it "apply: менять нечего — вопроса нет"         test_apply_asks_nothing_when_there_is_nothing_to_do
 
 printf '\nМодуль репозиториев\n'
 it "repos: правило нуля без манифеста"          test_repos_zero_rule_without_manifest
