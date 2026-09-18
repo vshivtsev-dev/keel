@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"path"
-	"strconv"
 	"time"
 
 	"github.com/vshivtsev-dev/keel/internal/facts"
 	"github.com/vshivtsev-dev/keel/internal/manifest"
 	"github.com/vshivtsev-dev/keel/internal/plan"
+	"github.com/vshivtsev-dev/keel/internal/ru"
 )
 
 // ConfigBackup складывает конфигурацию самого хоста в архив.
@@ -117,7 +117,7 @@ func (cb ConfigBackup) Plan(_ context.Context, m *manifest.Manifest, f *facts.Fa
 	out.Steps = append(out.Steps, plan.Step{
 		ID: tarID, Provider: cb.ID(), Resource: "архив",
 		Summary: fmt.Sprintf("собрать архив конфигурации %s (%s)",
-			path.Base(archive), plural(len(paths), "путь", "пути", "путей")),
+			path.Base(archive), ru.Path(len(paths))),
 		Action: plan.ActionExec, Cmd: tarCmd,
 		Needs: append([]string{mkdirID}, extraIDs...),
 	})
@@ -162,7 +162,7 @@ func (cb ConfigBackup) Verify(_ context.Context, m *manifest.Manifest, f *facts.
 	latest := f.ConfigArchives[0]
 	hours := int(latest.Age.Hours())
 	msg := fmt.Sprintf("последняя копия: %s (%s назад)",
-		path.Base(latest.Path), plural(hours, "час", "часа", "часов"))
+		path.Base(latest.Path), ru.Hour(hours))
 
 	return []plan.Finding{{Provider: cb.ID(), Resource: "копия конфигурации",
 		Message: msg, OK: latest.Age < maxAge}}, nil
@@ -173,18 +173,4 @@ func sysRoot(f *facts.Facts) string {
 		return "/"
 	}
 	return f.SysForPaths("/")
-}
-
-// plural склоняет русское существительное по числу.
-func plural(n int, one, few, many string) string {
-	form := many
-	if mod100 := n % 100; mod100 < 11 || mod100 > 14 {
-		switch n % 10 {
-		case 1:
-			form = one
-		case 2, 3, 4:
-			form = few
-		}
-	}
-	return strconv.Itoa(n) + " " + form
 }

@@ -44,6 +44,14 @@ type Facts struct {
 	Guests     []Guest
 	AptSources []AptSource
 	BackupJobs []BackupJob
+
+	// TemplatesDownloaded — шаблоны контейнеров, уже лежащие на хосте.
+	TemplatesDownloaded []string
+	// TemplatesAvailable — шаблоны, которые можно скачать.
+	TemplatesAvailable []string
+	// PctDevKeys — умеет ли этот Proxmox отдавать устройства ключами dev0
+	// (появились в PVE 8.2).
+	PctDevKeys bool
 	// Keyring — ключ, которым подписаны пакеты Proxmox. Путь зависит от
 	// версии PVE, и угадывать его нельзя: не тот ключ — apt отвергнет
 	// репозиторий целиком.
@@ -124,6 +132,7 @@ func Collect(ctx context.Context, p paths.Paths, c exec.Capturer) *Facts {
 	f.collectAPT(ctx, p, c)
 	f.collectAptSources(p.Sys)
 	f.collectBackupJobs(ctx, c)
+	f.collectLXC(ctx, c)
 	f.Report = buildReport(ctx, c)
 	f.SysForPaths = p.Sys
 	f.Keyring = findKeyring(p, f.Codename)
@@ -509,6 +518,25 @@ func (f *Facts) GuestExists(id int) bool {
 		}
 	}
 	return false
+}
+
+// GuestField читает поле из конфига гостя на хосте. Пусто — гостя нет
+// или поля в конфиге не оказалось.
+func (f *Facts) GuestField(id int, key string) string {
+	for _, dir := range []string{"/etc/pve/qemu-server", "/etc/pve/lxc"} {
+		path := dir + "/" + strconv.Itoa(id) + ".conf"
+		if f.SysForPaths != nil {
+			path = f.SysForPaths(path)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if v := fieldAfterColon(string(raw), key); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // Digest — отпечаток тех фактов, от которых зависит план. Если он разошёлся,

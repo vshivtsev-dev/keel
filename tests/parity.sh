@@ -30,6 +30,7 @@ PASSED=0; FAILED=0
 CASES=(
   "storage|host/30-storage|host/storage"
   "repos|host/10-repos|host/repos"
+  "backup|host/40-backup-jobs|host/backup"
 )
 
 # Известные и намеренные расхождения при сравнении деревьев.
@@ -103,6 +104,16 @@ manifest_for() {
   case "$1" in
     repos)
       printf '{ "host": { "repos": "no-subscription" } }\n'
+      ;;
+    backup)
+      cat <<'EOF'
+{
+  "backup": {
+    "schedule": "02:00", "storage": "local", "mode": "snapshot",
+    "guests": [100, 101], "keep_last": 3, "compress": "zstd"
+  }
+}
+EOF
       ;;
     storage)
       cat <<'EOF'

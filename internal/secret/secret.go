@@ -142,3 +142,81 @@ func (m *Masker) ApplyAll(in []string) []string {
 	}
 	return out
 }
+
+// --- Место секрета в плане ----------------------------------------------------
+//
+// Пароль рабочего стола попадает в сценарий настройки контейнера, токен
+// туннеля — в команду установки. А план сохраняется файлом на диск, и
+// секретов в нём быть не может.
+//
+// Поэтому в план кладётся не значение, а метка вида @@keel-secret:102@@.
+// Подставляет её тот, кто выполняет шаг, — прямо перед выполнением,
+// и только в памяти. В файле плана, в логе и на экране остаётся метка
+// или звёздочки.
+
+const (
+	markPrefix = "@@keel-secret:"
+	markSuffix = "@@"
+)
+
+// Mark — метка секрета для подстановки в шаг плана.
+func Mark(ref string) string { return markPrefix + ref + markSuffix }
+
+// Resolve подставляет значения секретов вместо меток.
+//
+// Неизвестная метка — ошибка, а не пустая строка: молча подставленная
+// пустота означала бы контейнер с пустым паролем.
+func (s *Store) Resolve(text string) (string, error) {
+	for {
+		start := strings.Index(text, markPrefix)
+		if start < 0 {
+			return text, nil
+		}
+		rest := text[start+len(markPrefix):]
+		end := strings.Index(rest, markSuffix)
+		if end < 0 {
+			return "", fmt.Errorf("неполная метка секрета в %q", text[start:])
+		}
+		ref := rest[:end]
+		value, err := s.Get(ref)
+		if err != nil {
+			return "", err
+		}
+		text = text[:start] + value + rest[end+len(markSuffix):]
+	}
+}
+
+// ResolveAll подставляет секреты в срез, не меняя исходный.
+func (s *Store) ResolveAll(in []string) ([]string, error) {
+	out := make([]string, len(in))
+	for i, v := range in {
+		got, err := s.Resolve(v)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = got
+	}
+	return out, nil
+}
+
+// Refs перечисляет метки, встреченные в тексте.
+func Refs(text string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for {
+		start := strings.Index(text, markPrefix)
+		if start < 0 {
+			return out
+		}
+		rest := text[start+len(markPrefix):]
+		end := strings.Index(rest, markSuffix)
+		if end < 0 {
+			return out
+		}
+		if ref := rest[:end]; !seen[ref] {
+			seen[ref] = true
+			out = append(out, ref)
+		}
+		text = rest[end+len(markSuffix):]
+	}
+}

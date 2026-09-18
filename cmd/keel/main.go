@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/vshivtsev-dev/keel/internal/cli"
@@ -38,6 +40,7 @@ const usage = `keel — сборка и восстановление хоста 
   --yes            не спрашивать перед каждым изменением
   --dry-run        ничего не выполнять, только показывать
   --only ID        один провайдер, например: --only host/storage
+  --guest ID       только эти гости, через запятую: --guest 100,101
   --manifest ПУТЬ  другой файл манифеста
   --stale          применить план, разошедшийся с состоянием хоста
   --json           машиночитаемый вывод
@@ -78,6 +81,21 @@ func run(argv []string) error {
 			opts.Commands = true
 		case "--no-color":
 			os.Setenv("KEEL_NO_COLOR", "1")
+		case "--guest":
+			v, err := next(argv, &i, "--guest")
+			if err != nil {
+				return err
+			}
+			if opts.Guests == nil {
+				opts.Guests = map[int]bool{}
+			}
+			for _, part := range strings.Split(v, ",") {
+				n, err := strconv.Atoi(strings.TrimSpace(part))
+				if err != nil {
+					return fmt.Errorf("--guest: %q — это не номер гостя", part)
+				}
+				opts.Guests[n] = true
+			}
 		case "--only":
 			var err error
 			if opts.Only, err = next(argv, &i, "--only"); err != nil {

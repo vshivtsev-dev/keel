@@ -130,3 +130,56 @@ func TestMaskerIgnoresTooShortValues(t *testing.T) {
 		t.Errorf("слишком короткое значение всё же замаскировано: %s", got)
 	}
 }
+
+// План сохраняется файлом на диск, поэтому секретов в нём быть не может.
+// В шаг кладётся метка, а значение подставляется прямо перед выполнением.
+func TestMarkResolvesOnlyAtExecution(t *testing.T) {
+	s := NewStore(filepath.Join(t.TempDir(), "secrets"))
+	if err := s.Put("102", "супертайна"); err != nil {
+		t.Fatal(err)
+	}
+
+	step := "printf %s:%s av " + Mark("102") + " | chpasswd"
+	if strings.Contains(step, "супертайна") {
+		t.Fatal("секрет попал в текст шага")
+	}
+
+	got, err := s.Resolve(step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "супертайна") || strings.Contains(got, "@@") {
+		t.Errorf("подстановка не сработала: %s", got)
+	}
+}
+
+// Молча подставленная пустота означала бы контейнер с пустым паролем.
+func TestResolveRefusesUnknownSecret(t *testing.T) {
+	s := NewStore(filepath.Join(t.TempDir(), "secrets"))
+	if _, err := s.Resolve("пароль: " + Mark("нет-такого")); err == nil {
+		t.Fatal("неизвестная метка подставлена молча")
+	}
+}
+
+func TestResolveHandlesSeveralMarks(t *testing.T) {
+	s := NewStore(filepath.Join(t.TempDir(), "secrets"))
+	for ref, value := range map[string]string{"102": "пароль", "cloudflared": "токен"} {
+		if err := s.Put(ref, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.Resolve(Mark("102") + " и " + Mark("cloudflared") + " и снова " + Mark("102"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "пароль и токен и снова пароль" {
+		t.Errorf("получено %q", got)
+	}
+}
+
+func TestRefsListsMarks(t *testing.T) {
+	got := Refs("a " + Mark("102") + " b " + Mark("cloudflared") + " c " + Mark("102"))
+	if len(got) != 2 || got[0] != "102" || got[1] != "cloudflared" {
+		t.Errorf("метки найдены неверно: %v", got)
+	}
+}

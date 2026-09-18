@@ -1,0 +1,52 @@
+// Рабочий стол в контейнере, вариант A: прямой доступ к видеокарте хоста.
+//
+// Контейнер делит встроенную видеокарту с хостом через /dev/dri. Работает
+// и 3D, и аппаратное декодирование видео. Хост консоль не теряет, reset bug
+// (беда проброса на 780M) здесь не существует как класс.
+//
+// Плата: общее с хостом ядро. Подключение к рабочему столу — по RDP.
+{
+  "kind": "lxc",
+  "title": "Рабочий стол (LXC, /dev/dri)",
+
+  "template": {
+    // Образец имени шаблона; конкретная версия берётся из pveam
+    "pattern": "ubuntu-24.04-standard",
+    "storage": "local"
+  },
+
+  // Рабочему столу нужен пароль для входа: keel спросит его при
+  // создании, а в неинтерактивном режиме сгенерирует и сохранит
+  // в /root/keel/secrets/. В манифесте паролей нет и не будет.
+  "needs_password": true,
+
+  "defaults": { "cores": 4, "memory": 8192, "disk": "64G" },
+
+  "lxc": {
+    "unprivileged": true,
+    "features": "nesting=1",
+    "ostype": "ubuntu",
+    "swap": 512,
+    // Проброс видеокарты хоста внутрь контейнера
+    "dri": true,
+    // Группы внутри контейнера, которым отдаются устройства.
+    // В Ubuntu 24.04 video=44, render=993; в Debian render=104.
+    // keel проверит и подскажет, если не совпало.
+    "video_gid": 44,
+    "render_gid": 993
+  },
+
+  "packages": [
+    "xfce4", "xfce4-goodies", "dbus-x11",
+    "xrdp",
+    "pipewire", "pipewire-pulse", "wireplumber",
+    "firefox", "vlc",
+    "mesa-utils", "vainfo", "va-driver-all",
+    "sudo", "curl"
+  ],
+
+  "runcmd": [
+    "adduser xrdp ssl-cert || true",
+    "systemctl enable --now xrdp"
+  ]
+}

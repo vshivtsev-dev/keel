@@ -42,6 +42,10 @@ type Runner struct {
 	Log io.Writer
 	// Mask прячет секреты во всём, что уходит на экран и в лог.
 	Mask func(string) string
+	// Resolve подставляет значения секретов вместо меток. Подстановка
+	// происходит прямо перед выполнением и только в памяти: в файле
+	// плана, в логе и на экране остаётся метка или звёздочки.
+	Resolve func(string) (string, error)
 	// Confirm спрашивает про каждый шаг. nil — не спрашивать: так работает
 	// применение уже подтверждённого плана.
 	Confirm func(step plan.Step, body string) Decision
@@ -140,6 +144,11 @@ func (r *Runner) Do(ctx context.Context, step plan.Step) error {
 		}
 	}
 
+	step, err = r.resolveSecrets(step)
+	if err != nil {
+		return err
+	}
+
 	switch step.Action {
 	case plan.ActionExec:
 		return r.doExec(ctx, step)
@@ -154,6 +163,35 @@ func (r *Runner) Do(ctx context.Context, step plan.Step) error {
 
 // body — то, что показывается человеку до выполнения: команда целиком или
 // diff файла.
+// resolveSecrets подставляет значения секретов. Делается это после того,
+// как шаг показан человеку и подтверждён: подтверждал он метку, а не
+// пароль, и на экране пароль так и не появится.
+func (r *Runner) resolveSecrets(step plan.Step) (plan.Step, error) {
+	if r.Resolve == nil || len(step.SecretRefs) == 0 {
+		return step, nil
+	}
+	out := step
+	if len(step.Cmd) > 0 {
+		cmd := make([]string, len(step.Cmd))
+		for i, a := range step.Cmd {
+			got, err := r.Resolve(a)
+			if err != nil {
+				return out, fmt.Errorf("шаг %s: %w", step.ID, err)
+			}
+			cmd[i] = got
+		}
+		out.Cmd = cmd
+	}
+	if len(step.Content) > 0 {
+		got, err := r.Resolve(string(step.Content))
+		if err != nil {
+			return out, fmt.Errorf("шаг %s: %w", step.ID, err)
+		}
+		out.Content = []byte(got)
+	}
+	return out, nil
+}
+
 func (r *Runner) body(step plan.Step) (string, error) {
 	switch step.Action {
 	case plan.ActionExec:

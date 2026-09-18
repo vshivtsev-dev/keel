@@ -1,0 +1,51 @@
+// Рабочий стол в ВМ с проброшенной видеокартой, вариант C.
+//
+// Видеокарту сюда добавляет не этот профиль, а модуль host/60-gpu-passthrough:
+// сначала он готовит хост (параметры ядра, vfio, привязка устройства), потом
+// прописывает hostpci0 этой ВМ.
+//
+// UEFI вместо BIOS — для проброса это не вкусовщина, а условие: с SeaBIOS
+// современные видеокарты инициализируются заметно хуже.
+//
+// Встроенный VGA намеренно оставлен по умолчанию: пока драйвер в госте не
+// поднялся, веб-консоль Proxmox — единственный способ туда попасть.
+{
+  "kind": "vm-cloudinit",
+  "title": "Рабочий стол (ВМ, проброшенная видеокарта)",
+
+  "image": {
+    "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
+    "compressed": "none"
+  },
+
+  "needs_password": true,
+
+  "defaults": { "cores": 4, "memory": 8192, "disk": "64G" },
+
+  "vm": {
+    "machine": "q35",
+    "bios": "ovmf",
+    "efidisk": true,
+    "pre_enrolled_keys": false,
+    "scsihw": "virtio-scsi-single",
+    "ostype": "l26",
+    "agent": true,
+    "cpu": "host",
+    "audio": "ich9-intel-hda,driver=spice",
+    "serial": false
+  },
+
+  "packages": [
+    "xfce4", "xfce4-goodies", "dbus-x11",
+    "lightdm",
+    "spice-vdagent",
+    "pipewire", "pipewire-pulse", "wireplumber",
+    "firefox", "vlc",
+    "mesa-utils", "vainfo", "va-driver-all",
+    "qemu-guest-agent"
+  ],
+
+  "runcmd": [
+    "systemctl set-default graphical.target"
+  ]
+}

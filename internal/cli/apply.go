@@ -58,6 +58,7 @@ func Apply(ctx context.Context, a *App, planPath string) error {
 		Sys:       a.Paths.Sys,
 		Sandboxed: a.Paths.Sandboxed(),
 		Guards:    guards(f),
+		Resolve:   a.Secrets.Resolve,
 		Stamp:     time.Now().Format("2006-01-02_150405"),
 	}
 	if a.Opts.Mode == ModeStep {

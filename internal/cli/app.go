@@ -5,14 +5,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/vshivtsev-dev/keel/internal/engine"
 	"github.com/vshivtsev-dev/keel/internal/exec"
 	"github.com/vshivtsev-dev/keel/internal/facts"
+	"github.com/vshivtsev-dev/keel/internal/image"
 	"github.com/vshivtsev-dev/keel/internal/journal"
 	"github.com/vshivtsev-dev/keel/internal/manifest"
 	"github.com/vshivtsev-dev/keel/internal/paths"
 	"github.com/vshivtsev-dev/keel/internal/provider"
+	"github.com/vshivtsev-dev/keel/internal/provider/guests"
 	"github.com/vshivtsev-dev/keel/internal/provider/host"
 	"github.com/vshivtsev-dev/keel/internal/secret"
 )
@@ -33,8 +36,11 @@ const (
 type Options struct {
 	Manifest string
 	Only     string
-	Mode     Mode
-	JSON     bool
+	// Guests сужает работу до перечисленных гостей: этим пользуется
+	// флаг --guest и экраны выбора.
+	Guests map[int]bool
+	Mode   Mode
+	JSON   bool
 	// Commands печатает только команды, по одной на строку.
 	Commands bool
 	// Stale разрешает применить план, разошедшийся с состоянием хоста.
@@ -57,11 +63,18 @@ type App struct {
 // Registry — порядок применения провайдеров. Он важен: хранилища заводятся
 // раньше гостей, которые на них лягут. Порядок задаётся здесь явно, а не
 // именами файлов, как было в bash.
-func Registry() *provider.Registry {
+func Registry(p paths.Paths, only map[int]bool) *provider.Registry {
 	return provider.NewRegistry(
 		host.Repos{},
 		host.Updates{},
 		host.Storage{},
+		// Гости создаются после хранилищ: им нужно, куда лечь, и нужны
+		// сниппеты для cloud-init, которые включает провайдер хранилищ.
+		guests.Guests{
+			Images:   image.NewResolver(),
+			Only:     only,
+			CacheDir: filepath.Join(p.Home(), "images"),
+		},
 		host.Backup{},
 		host.ConfigBackup{},
 	)
@@ -73,7 +86,7 @@ func NewApp(out io.Writer, p paths.Paths, opts Options, version string) *App {
 		Out:      out,
 		Paths:    p,
 		Opts:     opts,
-		Registry: Registry(),
+		Registry: Registry(p, opts.Guests),
 		Capturer: exec.System{},
 		Secrets:  secret.NewStore(p.Secrets()),
 		Masker:   masker,

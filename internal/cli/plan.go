@@ -21,6 +21,15 @@ func Plan(ctx context.Context, a *App) error {
 	if err != nil {
 		return err
 	}
+	if err := a.checkGuestSelection(m); err != nil {
+		return err
+	}
+
+	// Все вопросы — до сборки плана: применение должно идти без остановок.
+	if err := a.Prepare(m); err != nil {
+		return err
+	}
+
 	eng, err := a.Engine()
 	if err != nil {
 		return err

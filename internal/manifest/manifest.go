@@ -71,11 +71,22 @@ type Guest struct {
 
 	CloudInit *CloudInit `json:"cloudinit"`
 	Packages  []string   `json:"packages"`
+	Runcmd    []string   `json:"runcmd"`
+	// IP — адрес контейнера: «dhcp» или «10.0.0.5/24».
+	IP string `json:"ip"`
 }
 
 type CloudInit struct {
-	User       string `json:"user"`
+	User string `json:"user"`
+	// SSHKeyFrom: "host" — взять открытые ключи с хоста.
 	SSHKeyFrom string `json:"ssh_key_from"`
+	// SSHKeyFile — файл с открытыми ключами.
+	SSHKeyFile string `json:"ssh_key_file"`
+	IPConfig   string `json:"ipconfig"`
+
+	// SSHKeys — уже прочитанные ключи. В манифесте их нет: их наполняет
+	// keel, разобрав ssh_key_from и ssh_key_file.
+	SSHKeys []string `json:"-"`
 }
 
 type Backup struct {
