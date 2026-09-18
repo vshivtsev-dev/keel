@@ -82,23 +82,86 @@ EOF
   fi
 }
 
+# Все файлы источников apt, какие есть на хосте
+_repos_all_source_files() {
+  local f
+  for f in "$(fsroot /etc/apt/sources.list)" \
+           "$(fsroot /etc/apt/sources.list.d)"/*.sources \
+           "$(fsroot /etc/apt/sources.list.d)"/*.list; do
+    [[ -f "$f" ]] && printf '%s\n' "$f"
+  done
+  return 0
+}
+
+# Где включён компонент apt: pve-no-subscription, pve-enterprise, pvetest.
+#
+# apt не требует определённых имён файлов — он читает весь каталог и смотрит
+# внутрь. keel раньше искал по именам, и тот же репозиторий, положенный другим
+# инструментом под своим именем, был для него невидим: он завёл бы вторую
+# копию, а apt на две копии одного источника отвечает руганью. Теперь смотрим
+# так же, как смотрит apt.
+_repos_find_component() {
+  local want=$1 f
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    if [[ "$f" == *.sources ]]; then
+      grep -qE "^Components:.*[[:space:]]${want}([[:space:]]|\$)" "$f" 2>/dev/null || continue
+      _repos_deb822_is_disabled "$f" && continue
+    else
+      grep -qE "^[[:space:]]*deb[[:space:]].*[[:space:]]${want}([[:space:]]|\$)" "$f" 2>/dev/null || continue
+    fi
+    printf '%s\n' "$f"
+  done < <(_repos_all_source_files)
+  return 0
+}
+
+# Файлы, в которых нужный нам репозиторий уже включён — не считая нашего
+# собственного. Если такие есть, свой файл создавать нельзя.
+_repos_target_elsewhere() {
+  local target=$1 own comp f
+  own=$(_repos_file "$target")
+  comp=$(_repos_component "$target")
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    [[ "$f" == "$own" ]] && continue
+    printf '%s\n' "$f"
+  done < <(_repos_find_component "$comp")
+  return 0
+}
+
 # Файлы чужих репозиториев Proxmox, которые надо выключить при смене
 _repos_other_files() {
-  local target=$1 repo f
+  local target=$1 repo f comp out="" keep=""
+
+  # Файл, в котором лежит нужный нам репозиторий, выключать нельзя, даже если
+  # в нём заодно описан и чужой: один файл может нести несколько записей.
+  keep=$'\n'"$(_repos_find_component "$(_repos_component "$target")")"$'\n'
+
   for repo in no-subscription enterprise test; do
     [[ "$repo" == "$target" ]] && continue
+    comp=$(_repos_component "$repo")
     for f in "$(fsroot "/etc/apt/sources.list.d/pve-${repo}.sources")" \
              "$(fsroot "/etc/apt/sources.list.d/pve-${repo}.list")"; do
-      [[ -f "$f" ]] && printf '%s\n' "$f"
+      [[ -f "$f" ]] && out+="${f}"$'\n'
     done
+    # И под любым другим именем: apt смотрит в содержимое, теперь и мы тоже
+    out+="$(_repos_find_component "$comp")"$'\n'
   done
-  # Платный ceph-репозиторий тоже отвечает 401 без подписки
+
+  # Платный ceph отвечает 401 без подписки — ищем его в любом файле, а не
+  # только в ceph.sources
   if [[ "$target" != "enterprise" ]]; then
-    for f in "$(fsroot /etc/apt/sources.list.d/ceph.sources)" \
-             "$(fsroot /etc/apt/sources.list.d/ceph.list)"; do
-      [[ -f "$f" ]] && grep -q 'enterprise\.proxmox\.com' "$f" 2>/dev/null && printf '%s\n' "$f"
-    done
+    while IFS= read -r f; do
+      [[ -n "$f" ]] || continue
+      grep -q 'enterprise\.proxmox\.com' "$f" 2>/dev/null && out+="${f}"$'\n'
+    done < <(_repos_all_source_files)
   fi
+
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    [[ "$keep" == *$'\n'"${f}"$'\n'* ]] && continue
+    printf '%s\n' "$f"
+  done < <(printf '%s' "$out" | sed '/^$/d' | sort -u)
   return 0
 }
 
@@ -199,11 +262,22 @@ mod_check() {
       ;;
   esac
 
-  local changes=0 path want f
+  local changes=0 path want f elsewhere
   path=$(_repos_file "$target")
   want=$(_repos_desired_content "$target")
 
-  if ! _repos_file_matches "$path" "$want"; then
+  # Тот же репозиторий под чужим именем — не повод заводить свой: apt читает
+  # все файлы, и две копии одного источника он встретит руганью
+  elsewhere=$(_repos_target_elsewhere "$target")
+  if [[ -n "$elsewhere" ]]; then
+    while IFS= read -r f; do
+      [[ -n "$f" ]] || continue
+      note "Репозиторий ${target} уже включён в ${f} — свой файл не создаю."
+    done <<< "$elsewhere"
+    if [[ -f "$path" ]]; then
+      warn "Он же включён в ${path}: два одинаковых источника, apt будет ругаться. Лишний убери руками."
+    fi
+  elif ! _repos_file_matches "$path" "$want"; then
     printf 'включить репозиторий %s → %s\n' "$target" "$path"
     changes=1
   fi
@@ -231,7 +305,9 @@ mod_apply() {
   path=$(_repos_file "$target")
   want=$(_repos_desired_content "$target")
 
-  if ! _repos_file_matches "$path" "$want"; then
+  if [[ -n "$(_repos_target_elsewhere "$target")" ]]; then
+    note "Репозиторий ${target} уже включён в другом файле — свой не создаю."
+  elif ! _repos_file_matches "$path" "$want"; then
     printf '%s' "$want" | run_write "Включить репозиторий ${target}" "$path"
   fi
 
@@ -258,7 +334,10 @@ mod_verify() {
   path=$(_repos_file "$target")
   want=$(_repos_desired_content "$target")
 
-  if _repos_file_matches "$path" "$want"; then
+  local elsewhere; elsewhere=$(_repos_target_elsewhere "$target")
+  if [[ -n "$elsewhere" ]]; then
+    printf 'репозиторий %s включён (в %s)\n' "$target" "${elsewhere%%$'\n'*}"
+  elif _repos_file_matches "$path" "$want"; then
     printf 'репозиторий %s включён\n' "$target"
   else
     printf 'репозиторий %s НЕ настроен (%s)\n' "$target" "$path"

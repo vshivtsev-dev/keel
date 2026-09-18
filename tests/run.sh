@@ -1693,6 +1693,112 @@ EOF
   assert_not_ran "pvesh delete"
 }
 
+
+# --- apt смотрит в содержимое, а не на имена файлов --------------------------
+#
+# Community-скрипт кладёт тот же репозиторий в proxmox.sources, keel — в
+# pve-no-subscription.sources. Раньше keel чужого имени не видел и завёл бы
+# вторую копию; apt на две копии одного источника отвечает руганью.
+
+test_repos_does_not_duplicate_foreign_named_repo() {
+  _fake_host_deb822
+  cat >"${KEEL_FS_ROOT}/etc/apt/sources.list.d/proxmox.sources" <<'EOF'
+Types: deb
+URIs: http://download.proxmox.com/debian/pve
+Suites: trixie
+Components: pve-no-subscription
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+EOF
+  _manifest_repos "no-subscription"
+  export KEEL_MODE="yes"
+
+  local out; out=$(mod_out host/10-repos check)
+  assert_contains "$out" "уже включён в"
+  assert_contains "$out" "proxmox.sources"
+
+  ( source "${KEEL_ROOT}/modules/host/10-repos.sh"; mod_apply ) >/dev/null 2>&1 || true
+  if [[ -f "${KEEL_FS_ROOT}/etc/apt/sources.list.d/pve-no-subscription.sources" ]]; then
+    fail "keel завёл вторую копию репозитория — apt будет ругаться на дубль"
+  fi
+
+  local rc=0
+  ( source "${KEEL_ROOT}/modules/host/10-repos.sh"; mod_verify ) >/dev/null 2>&1 || rc=$?
+  assert_rc 0 "$rc" "репозиторий включён, пусть и в чужом файле"
+}
+
+# Платный репозиторий под нестандартным именем тоже надо выключать:
+# иначе apt update ловит 401 на каждом запуске.
+test_repos_disables_foreign_named_enterprise() {
+  _fake_host_deb822
+  rm -f "${KEEL_FS_ROOT}/etc/apt/sources.list.d/pve-enterprise.sources"
+  cat >"${KEEL_FS_ROOT}/etc/apt/sources.list.d/мой-платный.sources" <<'EOF'
+# Заведено руками
+Types: deb
+URIs: https://enterprise.proxmox.com/debian/pve
+Suites: trixie
+Components: pve-enterprise
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+EOF
+  _manifest_repos "no-subscription"
+  export KEEL_MODE="yes"
+
+  assert_contains "$(mod_out host/10-repos check)" "мой-платный.sources"
+  ( source "${KEEL_ROOT}/modules/host/10-repos.sh"; mod_apply ) >/dev/null 2>&1 \
+    || fail "применение не удалось"
+
+  local f="${KEEL_FS_ROOT}/etc/apt/sources.list.d/мой-платный.sources"
+  assert_contains "$(cat "$f")" "Enabled: false"
+  # Чужой файл только выключается, а не переписывается: что было — осталось
+  assert_contains "$(cat "$f")" "# Заведено руками"
+  assert_contains "$(cat "$f")" "enterprise.proxmox.com"
+}
+
+# Платный ceph тоже может лежать под своим именем
+test_repos_disables_foreign_named_paid_ceph() {
+  _fake_host_deb822
+  cat >"${KEEL_FS_ROOT}/etc/apt/sources.list.d/ceph-мой.sources" <<'EOF'
+Types: deb
+URIs: https://enterprise.proxmox.com/debian/ceph-squid
+Suites: trixie
+Components: enterprise
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+EOF
+  _manifest_repos "no-subscription"
+  export KEEL_MODE="yes"
+  ( source "${KEEL_ROOT}/modules/host/10-repos.sh"; mod_apply ) >/dev/null 2>&1 \
+    || fail "применение не удалось"
+  assert_contains "$(cat "${KEEL_FS_ROOT}/etc/apt/sources.list.d/ceph-мой.sources")" "Enabled: false"
+}
+
+# Один файл может нести и нужный репозиторий, и чужой. Выключать такой файл
+# целиком нельзя: вместе с чужим погаснет и тот, ради которого всё затевалось.
+test_repos_keeps_file_that_also_holds_the_target() {
+  _fake_host_deb822
+  rm -f "${KEEL_FS_ROOT}/etc/apt/sources.list.d/pve-enterprise.sources"
+  cat >"${KEEL_FS_ROOT}/etc/apt/sources.list.d/всё-вместе.sources" <<'EOF'
+Types: deb
+URIs: http://download.proxmox.com/debian/pve
+Suites: trixie
+Components: pve-no-subscription
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+
+Types: deb
+URIs: https://enterprise.proxmox.com/debian/pve
+Suites: trixie
+Components: pve-enterprise
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+EOF
+  _manifest_repos "no-subscription"
+  export KEEL_MODE="yes"
+  ( source "${KEEL_ROOT}/modules/host/10-repos.sh"; mod_apply ) >/dev/null 2>&1 || true
+
+  local f="${KEEL_FS_ROOT}/etc/apt/sources.list.d/всё-вместе.sources"
+  if grep -q '^Enabled: false' "$f"; then
+    fail "keel выключил файл, в котором лежит нужный репозиторий:
+$(cat "$f")"
+  fi
+}
+
 # --- Запуск ------------------------------------------------------------------
 
 printf '\nОкружение\n'
@@ -1733,6 +1839,10 @@ it "repos: отвергает неизвестное значение"      test
 it "repos: не трогает настоящую систему"        test_repos_never_touches_real_root_in_tests
 it "repos: выключенный файл валиден для apt"    test_repos_disabled_file_stays_valid_for_apt
 it "repos: чинит файл, сломанный прошлой версией" test_repos_repairs_file_broken_by_older_keel
+it "repos: не плодит вторую копию репозитория"  test_repos_does_not_duplicate_foreign_named_repo
+it "repos: выключает платный под чужим именем"  test_repos_disables_foreign_named_enterprise
+it "repos: выключает платный ceph под чужим именем" test_repos_disables_foreign_named_paid_ceph
+it "repos: не гасит файл с нужным репозиторием" test_repos_keeps_file_that_also_holds_the_target
 
 printf '\nФаза 1: хост\n'
 it "updates: правило нуля"                      test_updates_zero_rule
