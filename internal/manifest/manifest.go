@@ -72,7 +72,9 @@ type Guest struct {
 	CloudInit *CloudInit `json:"cloudinit"`
 	Packages  []string   `json:"packages"`
 	Runcmd    []string   `json:"runcmd"`
-	// IP — адрес контейнера: «dhcp» или «10.0.0.5/24».
+	// IP — адрес контейнера: «dhcp» или «192.0.2.5/24» (адрес из
+	// документационного диапазона RFC 5737: настоящий частный адрес в
+	// примере — это след чьей-то настоящей сети).
 	IP string `json:"ip"`
 }
 
