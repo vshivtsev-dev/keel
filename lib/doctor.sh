@@ -28,14 +28,6 @@ doctor_environment() {
     _doc_warn "Права" "не root — менять систему не получится, смотреть можно"
   fi
 
-  # Отсутствие whiptail ничего не ломает: он рисует только меню и списки
-  # с галочками, а план, подтверждение и применение текстовые всегда.
-  if command -v whiptail >/dev/null 2>&1; then
-    _doc_ok "whiptail" "есть, меню со стрелками доступно"
-  else
-    _doc_ok "whiptail" "нет — меню будет списком с номерами, остальное не зависит"
-  fi
-
   if config_parser_available; then
     if config_relaxed_supported; then
       _doc_ok "Парсер манифеста" "JSON::PP, режим relaxed — комментарии работают"

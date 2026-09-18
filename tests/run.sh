@@ -46,7 +46,7 @@ load_keel() {
   export KEEL_BACKUP_DIR="${T}/state/backups"
   export KEEL_SECRETS_DIR="${T}/state/secrets"
   export KEEL_MANIFEST="${T}/home/host.json"
-  export KEEL_UI="plain"
+  export KEEL_COLOR="off"
   # shellcheck source=../lib/core.sh
   source "${KEEL_ROOT}/lib/core.sh"
   # shellcheck source=../lib/ui.sh
@@ -1419,6 +1419,25 @@ ${hits}"
   fi
 }
 
+# Интерфейс — текст, и не должен снова обзавестись рисовалкой окон.
+#
+# Проверка не про вкус. newt заливает фоном весь экран и рисует коробку
+# фиксированных 78 колонок независимо от терминала, а главное — перерисовывает
+# экран, унося наверх всё, что keel уже сказал. На IPMI-консоли, где идёт
+# восстановление, это разница между «видно ход работы» и «видно последний кадр».
+# Вернуть такое случайно легко, поэтому стоит сторож.
+test_ui_draws_no_windows() {
+  local hits
+  # Строки комментариев отбрасываются: объяснить, почему рисовалки окон тут
+  # нет, — ровно то, чего от комментария и ждут, и запрещать это незачем
+  hits=$(grep -rniE 'whiptail|newt' bin/ lib/ modules/ install.sh 2>/dev/null \
+         | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)
+  if [[ -n "$hits" ]]; then
+    fail "интерфейс keel текстовый — рисовалка окон здесь лишняя:
+${hits}"
+  fi
+}
+
 
 # --- Один каталог, туннель и экран подтверждения -----------------------------
 
@@ -1522,16 +1541,17 @@ test_post_install_script_removes_itself() {
 ${out}"
 }
 
-# Экран подтверждения: длинный текст обрезается, короткий остаётся целым.
-test_confirm_clips_long_body() {
-  local body short
-  body=$(seq 1 40)
-  short=$(_ui_clip "$body" 14)
-  assert_eq "$(printf '%s\n' "$short" | wc -l)" "15" "14 строк плюс строка про остаток"
-  assert_contains "$short" "показать целиком"
-
-  short=$(_ui_clip "$(seq 1 5)" 14)
-  assert_eq "$short" "$(seq 1 5)" "короткий текст обрезать не надо"
+# Длинный diff показывается целиком. Обрезать его было нужно, только пока он
+# лез в окно фиксированной высоты; в потоке текста обрезка — это потерянные
+# строки ровно там, где человек решает, применять ли изменение.
+test_confirm_shows_the_whole_body() {
+  keel_have_tty() { return 0; }
+  # read вернёт единицу на закрытом stdin — для теста это ответ «пусто»,
+  # то есть «применить», а нам важен сам текст, ушедший на экран
+  local shown
+  shown=$(ui_confirm_step "правка" "$(seq 1 40)" 2>&1 >/dev/null </dev/null)
+  assert_contains "$shown" "40"
+  assert_eq "$(printf '%s\n' "$shown" | grep -cE '^[0-9]+$')" "40" "все сорок строк"
 }
 
 
@@ -1821,7 +1841,6 @@ it "env: UTF-8 локаль для выравнивания"         test_env_ut
 # Без выравнивания по колонкам — printf считает байты, а не символы.
 printf '  · система: %s\n' "$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-неизвестно}")"
 printf '  · bash %s, perl %s\n' "${BASH_VERSION}" "$(perl -e 'print $]' 2>/dev/null || echo '—')"
-printf '  · whiptail: %s\n' "$(command -v whiptail >/dev/null && echo 'есть' || echo 'нет, меню будет текстовым')"
 
 printf '\nМанифест\n'
 it "config: комментарии в JSON"                 test_config_comments
@@ -1840,7 +1859,7 @@ it "core: dry-run ничего не выполняет"          test_core_dry_r
 it "core: run_write идемпотентен"               test_core_run_write_adds_newline_and_is_idempotent
 it "core: run_write делает резервную копию"     test_core_run_write_makes_backup
 it "core: все пути внутри KEEL_HOME"            test_paths_all_live_under_home
-it "ui: длинный diff обрезается для экрана"     test_confirm_clips_long_body
+it "ui: длинный diff показывается целиком"      test_confirm_shows_the_whole_body
 
 printf '\nСогласие: один вопрос вместо полусотни\n'
 it "once: после согласия на план вопросов нет"  test_core_once_asks_nothing_after_plan_confirmed
@@ -1945,6 +1964,7 @@ it "cli: apply отказывается вне Proxmox"        test_cli_apply_re
 
 printf '\nСтатические проверки\n'
 it "статика: глобального IFS нет"               test_no_global_ifs
+it "статика: интерфейс не рисует окон"          test_ui_draws_no_windows
 if ./tests/lint-run-guard.sh >/dev/null 2>&1; then
   printf '  ✓ run-guard: изменения только через run()\n'; PASSED=$(( PASSED + 1 ))
 else

@@ -3,140 +3,144 @@
 #
 # keel :: интерфейс
 #
-# Обёртки над whiptail (он есть на любом Debian/Proxmox из коробки).
-# Если whiptail недоступен или мы не в терминале — всё то же самое
-# работает обычным текстом. Ни один модуль не вызывает whiptail напрямую.
+# Обычный текст и ничего больше. Ни рамок, ни фона, ни окон.
 #
-# Граница, по которой здесь всё поделено: окна — для выбора, текст — для
-# работы. Выбрать пункт меню или отметить гостей галочками удобнее стрелками,
-# и окно там ничему не мешает — выбирать не из чего, кроме списка. А вот
-# согласиться с планом нужно, глядя на сам план: окно newt очищает экран, и
-# ровно то, ради чего человека спрашивают, исчезает у него из-под носа.
-# Поэтому ui_confirm_plan окном не бывает никогда.
+# Здесь был whiptail, и убран он не из вкусовщины. Newt заливает своим фоном
+# весь экран целиком — в дампе терминала 160×45 это `ESC[45m` на каждой из
+# сорока пяти строк, — а поверх заливки рисует коробку фиксированной ширины
+# 78 колонок и высотой не больше 30 строк. На широком терминале выходит
+# половина экрана пустого фона вокруг узкой колонки текста, и ни один из
+# трёх параметров от размера терминала не зависит.
+#
+# Текст таких проблем не имеет по построению: он занимает ровно ту ширину,
+# которая есть, ничего не заливает, прокручивается штатной прокруткой
+# терминала и копируется мышью. Плюс одно следствие, важное для инструмента
+# восстановления: экран больше не «перерисовывается», поэтому всё, что keel
+# сказал раньше, остаётся выше по прокрутке — на IPMI-консоли это разница
+# между «видно, что произошло» и «видно последний кадр».
+#
+# Цена решения: по списку больше не ходят стрелками, пункты выбираются
+# номером. Для меню из десяти строк это равноценный размен, а зависимостей
+# и режимов стало на один меньше — раньше каждая функция здесь имела две
+# реализации, и текстовая, как менее заметная, отставала от оконной.
 
-KEEL_UI="${KEEL_UI:-auto}"   # auto | plain
-
-ui_has_whiptail() {
-  [[ "$KEEL_UI" != "plain" ]] || return 1
-  command -v whiptail >/dev/null 2>&1 || return 1
-  [[ -t 2 ]] || return 1
-  return 0
+# Один вопрос — одна проверка терминала. Печатает ответ в stdout;
+# возвращает 1, если спрашивать не у кого (вызывающий решает, что это значит).
+_ui_ask() {
+  local prompt=$1 reply
+  keel_have_tty || return 1
+  read -r -p "${prompt}: " reply </dev/tty || return 1
+  printf '%s' "$reply"
 }
 
-# Высота окна под количество строк текста, в разумных пределах
-_ui_height() {
-  local lines=$1 extra=${2:-8} h
-  h=$(( lines + extra ))
-  (( h < 12 )) && h=12
-  (( h > 30 )) && h=30
-  printf '%s' "$h"
+# Заголовок перед вопросом. Идёт в stderr: stdout у этих функций занят
+# ответом, и любая подпись, попавшая туда, испортила бы его.
+_ui_title() {
+  local title=$1 text=${2:-}
+  printf '\n%s%s%s\n' "$C_BOLD" "$title" "$C_RESET" >&2
+  if [[ -n "$text" ]]; then
+    printf '%s%s%s\n' "$C_DIM" "$text" "$C_RESET" >&2
+  fi
 }
 
-_ui_lines() { printf '%s' "$(printf '%s' "$1" | wc -l)"; }
-
+# Показать текст. Это не диалог, отвечать не надо — просто вывод.
 ui_msgbox() {
   local title=$1 text=$2
-  if ui_has_whiptail; then
-    whiptail --title "$title" --scrolltext \
-      --msgbox "$text" "$(_ui_height "$(_ui_lines "$text")")" 78
-  else
-    printf '\n--- %s ---\n%s\n\n' "$title" "$text"
-  fi
+  head1 "$title"
+  printf '%s\n' "$text"
 }
 
 ui_yesno() {
-  local title=$1 text=$2
-  if ui_has_whiptail; then
-    whiptail --title "$title" --yesno "$text" \
-      "$(_ui_height "$(_ui_lines "$text")")" 78
-  else
-    local reply
-    printf '\n--- %s ---\n%s\n' "$title" "$text" >&2
-    read -r -p "Продолжить? [y/N] " reply </dev/tty
-    [[ "$reply" == [yYдД]* ]]
-  fi
+  local title=$1 text=$2 reply
+  _ui_title "$title" "$text"
+  reply=$(_ui_ask "Продолжить? [y/N]") || return 1
+  [[ "$reply" == [yYдД]* ]]
 }
 
 # ui_menu "заголовок" "текст" тег1 "пункт 1" тег2 "пункт 2" ...
 # Печатает выбранный тег в stdout. Пустой вывод = отмена.
 ui_menu() {
   local title=$1 text=$2; shift 2
-  local count=$(( $# / 2 ))
-  if ui_has_whiptail; then
-    # --default-item задаёт выделенный пункт явно, а не оставляет на усмотрение
-    # newt. Флаг относится только к --menu; у --checklist его нет, и пробовать
-    # там не будем: whiptail на неизвестный флаг просто выходит с ошибкой, а мы
-    # её глушим — получился бы молча пустой выбор.
-    whiptail --title "$title" --notags --default-item "$1" --menu "$text" \
-      "$(_ui_height "$count" 10)" 78 "$count" "$@" 3>&1 1>&2 2>&3 || true
-  else
-    local i=1 tags=() args=("$@")
-    printf '\n--- %s ---\n%s\n' "$title" "$text" >&2
-    while (( ${#args[@]} )); do
-      tags+=("${args[0]}")
-      printf '  %2d) %s\n' "$i" "${args[1]}" >&2
-      args=("${args[@]:2}"); i=$(( i + 1 ))
-    done
-    local reply
-    read -r -p "Номер пункта (пусто — отмена): " reply </dev/tty
-    [[ "$reply" =~ ^[0-9]+$ ]] || return 0
-    (( reply >= 1 && reply <= ${#tags[@]} )) || return 0
-    printf '%s' "${tags[$(( reply - 1 ))]}"
-  fi
+  local tags=() labels=() args=("$@")
+  while (( ${#args[@]} )); do
+    tags+=("${args[0]}")
+    labels+=("${args[1]}")
+    args=("${args[@]:2}")
+  done
+
+  _ui_title "$title" "$text"
+  local i
+  for i in "${!tags[@]}"; do
+    printf '  %s%2d%s  %s\n' "$C_BOLD" "$(( i + 1 ))" "$C_RESET" "${labels[i]}" >&2
+  done
+  printf '\n' >&2
+
+  local reply
+  reply=$(_ui_ask "Пункт (пусто — выход)") || return 0
+  [[ "$reply" =~ ^[0-9]+$ ]] || return 0
+  (( reply >= 1 && reply <= ${#tags[@]} )) || return 0
+  printf '%s' "${tags[$(( reply - 1 ))]}"
 }
 
 # ui_checklist "заголовок" "текст" тег1 "пункт" on/off ...
-# Печатает выбранные теги через пробел.
+# Печатает выбранные теги через пробел, каждый в кавычках.
+#
+# Пустой ответ принимает то, что отмечено заранее, — так же, как принимала
+# кнопка OK в прежнем окне. Отказаться от всего можно минусом: это должно
+# быть отдельным действием, а не случайным Enter.
 ui_checklist() {
   local title=$1 text=$2; shift 2
-  local count=$(( $# / 3 ))
-  if ui_has_whiptail; then
-    whiptail --title "$title" --notags --checklist "$text" \
-      "$(_ui_height "$count" 10)" 78 "$count" "$@" 3>&1 1>&2 2>&3 || true
-  else
-    local i=1 tags=() args=("$@")
-    printf '\n--- %s ---\n%s\n' "$title" "$text" >&2
-    while (( ${#args[@]} )); do
-      tags+=("${args[0]}")
-      printf '  %2d) %s\n' "$i" "${args[1]}" >&2
-      args=("${args[@]:3}"); i=$(( i + 1 ))
+  local tags=() labels=() marks=() args=("$@")
+  while (( ${#args[@]} )); do
+    tags+=("${args[0]}")
+    labels+=("${args[1]}")
+    marks+=("${args[2]}")
+    args=("${args[@]:3}")
+  done
+
+  _ui_title "$title" "$text"
+  local i box
+  for i in "${!tags[@]}"; do
+    if [[ "${marks[i]}" == "on" ]]; then box="[x]"; else box="[ ]"; fi
+    printf '  %s%2d%s  %s  %s\n' "$C_BOLD" "$(( i + 1 ))" "$C_RESET" "$box" "${labels[i]}" >&2
+  done
+  printf '\n' >&2
+
+  local reply
+  reply=$(_ui_ask "Номера через пробел (пусто — отмеченные, «-» — ничего)") || return 0
+
+  local out=() n
+  if [[ -z "$reply" ]]; then
+    for i in "${!tags[@]}"; do
+      if [[ "${marks[i]}" == "on" ]]; then out+=("\"${tags[i]}\""); fi
     done
-    local reply out=()
-    read -r -p "Номера через пробел (пусто — ничего): " reply </dev/tty
-    local n
+  elif [[ "$reply" != "-" ]]; then
     for n in $reply; do
       [[ "$n" =~ ^[0-9]+$ ]] || continue
-      (( n >= 1 && n <= ${#tags[@]} )) && out+=("\"${tags[$(( n - 1 ))]}\"")
+      if (( n >= 1 && n <= ${#tags[@]} )); then out+=("\"${tags[$(( n - 1 ))]}\""); fi
     done
-    printf '%s' "${out[*]}"
   fi
+  printf '%s' "${out[*]-}"
 }
 
 # Согласие на весь план, одним вопросом. Печатает в stdout ровно одно слово:
 # apply | detail | step | cancel.
 #
-# Окна здесь нет намеренно — см. заголовок файла. План только что проехал по
-# экрану, и вопрос должен стоять под ним, а не поверх него.
-#
-# Ответов четыре, потому что «да/нет» на список из полусотни команд — выбор
-# между доверием и отказом, а нужен третий путь: «покажи подробно» разворачивает
-# план до каждой команды и каждого diff, «по шагам» возвращает старое поведение
-# для тех случаев, когда хочется держать руку на рубильнике.
+# Ответов четыре, потому что «да/нет» на список из трёх десятков команд —
+# выбор между доверием и отказом, а нужен третий путь: «подробно»
+# разворачивает план до каждой команды и каждого diff, «по шагам» возвращает
+# вопрос перед каждым изменением.
 ui_confirm_plan() {
   local prompt=${1:-"Применить эти изменения?"} reply
 
-  # Подсказки — строго в stderr: stdout здесь это ответ, и note() посреди него
-  # превратил бы «cancel» в строку, которую вызывающая сторона не узнает
-  if ! keel_have_tty; then
+  _ui_title "$prompt" "y — применить · d — подробно · s — по шагам · пусто — отмена"
+  # Подсказки ушли в stderr вместе с заголовком: stdout здесь это ответ
+  if ! reply=$(_ui_ask "Ответ [y/N]"); then
     err "Некому задать вопрос: терминала нет."
     note "Для неинтерактивного запуска есть keel apply --yes (после keel plan)." >&2
     printf 'cancel'
     return 0
   fi
-
-  printf '\n%s%s%s [y/N]  %sd — подробно, s — по шагам%s\n' \
-    "$C_BOLD" "$prompt" "$C_RESET" "$C_DIM" "$C_RESET" >&2
-  read -r -p "> " reply </dev/tty || reply=""
 
   # Русские буквы здесь не для красоты: на консоли Proxmox легко забыть
   # переключить раскладку, и тогда клавиша d даёт «в», а s — «ы». Плюс «д» и
@@ -150,98 +154,51 @@ ui_confirm_plan() {
   esac
 }
 
-# Экран подтверждения одного изменения.
-# Печатает в stdout ровно одно слово: apply | skip | abort
+# Подтверждение одного изменения — режим --step.
+# Печатает в stdout ровно одно слово: apply | skip | abort.
 #
-# Здесь нет --scrolltext, и это важно. В newt прокручиваемый текстовый блок
-# принимает фокус и стоит в форме первым: при открытии стрелки листали бы
-# diff, а до списка пришлось бы уходить вправо. Поэтому текст обрезается до
-# экрана, а целиком его показывает отдельный пункт меню — там прокрутка
-# уместна, кнопка одна, и фокус на тексте это ровно то, что нужно.
-KEEL_CONFIRM_BODY_LINES="${KEEL_CONFIRM_BODY_LINES:-14}"
+# Текст показывается целиком: обрезать его было нужно, только пока он
+# помещался в окно фиксированной высоты.
+ui_confirm_step() {
+  local desc=$1 body=$2 reply
 
-_ui_clip() {
-  local body=$1 limit=$2 n
-  n=$(printf '%s\n' "$body" | wc -l)
-  if (( n <= limit )); then
-    printf '%s' "$body"
+  _ui_title "$desc"
+  printf '%s\n' "$body" >&2
+
+  # Пустой ответ здесь значит «применить» — и потому спрашивать вслепую
+  # нельзя: read из неоткрываемого /dev/tty оставляет ответ ровно пустым,
+  # то есть без этой проверки keel применял бы всё подряд, не спросив.
+  if ! reply=$(_ui_ask "Enter — применить · s — пропустить · другое — прервать"); then
+    err "Нужен ответ на каждый шаг, но терминала нет."
+    note "Для неинтерактивного запуска: keel apply --yes (после keel plan)." >&2
+    printf 'abort'
     return 0
   fi
-  printf '%s\n' "$body" | head -n "$limit"
-  printf '… ещё %s строк — пункт «показать целиком»' "$(( n - limit ))"
+
+  case "$reply" in
+    ""|y|Y|p|P|д|Д) printf 'apply' ;;
+    s|S|ы|Ы)        printf 'skip' ;;
+    *)              printf 'abort' ;;
+  esac
 }
 
-ui_confirm_step() {
-  local desc=$1 body=$2
-  if ui_has_whiptail; then
-    local short text choice
-    short=$(_ui_clip "$body" "$KEEL_CONFIRM_BODY_LINES")
-    text="Будет выполнено:
-
-${desc}
-
-${short}"
-    while true; do
-      choice=$(whiptail --title "Подтверждение изменения" --notags \
-        --default-item apply --menu "$text" \
-        "$(_ui_height "$(_ui_lines "$text")" 12)" 78 4 \
-        apply "Применить" \
-        skip  "Пропустить этот шаг" \
-        full  "Показать целиком" \
-        abort "Прервать" 3>&1 1>&2 2>&3) || choice="abort"
-      if [[ "$choice" == "full" ]]; then
-        ui_msgbox "$desc" "$body"
-        continue
-      fi
-      printf '%s' "${choice:-abort}"
-      return 0
-    done
-  else
-    # Без терминала спрашивать не у кого — и молча применять тем более нельзя.
-    # Пустой ответ здесь значит «применить», а неоткрытый /dev/tty оставляет
-    # ответ ровно пустым: без этой проверки пошаговый режим в неинтерактивном
-    # запуске применял бы всё подряд, не спросив ни разу.
-    if ! keel_have_tty; then
-      err "Нужен ответ на каждый шаг, но терминала нет."
-      note "Для неинтерактивного запуска: keel apply --yes (после keel plan)." >&2
-      printf 'abort'
-      return 0
-    fi
-    printf '\n%s\n%s\n' "$desc" "$body" >&2
-    local reply
-    read -r -p "Enter — применить, s — пропустить, любое другое — прервать: " reply </dev/tty
-    case "$reply" in
-      ""|y|Y|p|P) printf 'apply' ;;
-      s|S)        printf 'skip' ;;
-      *)          printf 'abort' ;;
-    esac
-  fi
-}
-
-# Запрос пароля. В текстовом режиме ввод не отображается.
+# Запрос пароля. Ввод не отображается.
 # Пустой ответ — вызывающая сторона решает, что делать.
 ui_password() {
-  local title=$1 text=$2
-  if ui_has_whiptail; then
-    whiptail --title "$title" --passwordbox "$text" 12 70 3>&1 1>&2 2>&3 || true
-  else
-    local reply
-    printf '\n--- %s ---\n%s\n' "$title" "$text" >&2
-    read -r -s -p "Пароль (пусто — сгенерировать): " reply </dev/tty
-    printf '\n' >&2
-    printf '%s' "$reply"
-  fi
+  local title=$1 text=$2 reply
+  _ui_title "$title" "$text"
+  keel_have_tty || { printf ''; return 0; }
+  read -r -s -p "Пароль (пусто — сгенерирую): " reply </dev/tty || reply=""
+  printf '\n' >&2
+  printf '%s' "$reply"
 }
 
 # Однострочный ввод. Печатает введённое в stdout, пустое — отмена.
 ui_input() {
-  local title=$1 text=$2 default=${3:-}
-  if ui_has_whiptail; then
-    whiptail --title "$title" --inputbox "$text" 12 78 "$default" 3>&1 1>&2 2>&3 || true
-  else
-    local reply
-    printf '\n--- %s ---\n%s\n' "$title" "$text" >&2
-    read -r -p "> " -e -i "$default" reply </dev/tty || true
-    printf '%s' "$reply"
-  fi
+  local title=$1 text=$2 default=${3:-} reply
+  _ui_title "$title" "$text"
+  keel_have_tty || { printf ''; return 0; }
+  # -e -i даёт готовое значение, которое можно поправить, а не перенабирать
+  read -r -e -i "$default" -p "> " reply </dev/tty || reply=""
+  printf '%s' "$reply"
 }

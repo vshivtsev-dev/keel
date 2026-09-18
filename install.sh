@@ -25,13 +25,11 @@ KEEL_TARBALL="${KEEL_TARBALL:-https://codeload.github.com/${KEEL_OWNER}/${KEEL_N
 
 if [[ -t 1 ]]; then
   C_RESET=$'\033[0m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'
-  C_DIM=$'\033[2m'
 else
-  C_RESET=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_DIM=''
+  C_RESET=''; C_GREEN=''; C_YELLOW=''; C_RED=''
 fi
 ok()   { printf '%s✓%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
 warn() { printf '%s!%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
-note() { printf '%s  %s%s\n' "$C_DIM" "$*" "$C_RESET"; }
 die()  { printf '%s✗%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 
 # --- Проверки окружения ------------------------------------------------------
@@ -49,11 +47,6 @@ fi
 perl -MJSON::PP -e 'exit 0' >/dev/null 2>&1 \
   || die "Нет perl с JSON::PP — читать манифест нечем. Это странно для Proxmox."
 command -v tar >/dev/null 2>&1 || die "Нет tar — распаковать репозиторий нечем."
-
-# whiptail рисует только меню и списки с галочками. План, подтверждение и
-# применение текстовые в любом случае, поэтому это заметка, а не дефект.
-command -v whiptail >/dev/null 2>&1 \
-  || note "Нет whiptail — меню будет списком с номерами (поставить: apt install whiptail)."
 
 [[ -e "$KEEL_PREFIX" && ! -d "$KEEL_PREFIX" ]] \
   && die "${KEEL_PREFIX} существует и это не каталог. Убери его или задай KEEL_PREFIX."

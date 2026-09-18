@@ -46,14 +46,34 @@ module_invoke() {
   )
 }
 
+# Ширина колонки с идентификаторами. Считается по самому длинному из тех, что
+# будут показаны, а не берётся константой: константа была 18, а
+# host/60-gpu-passthrough — это 23 символа, и на нём колонка разъезжалась,
+# сдвигая заголовок вправо ровно у того модуля, который опаснее прочих.
+KEEL_PLAN_IDW=12
+
+_modules_id_width() {
+  local filter=${1:-} path id w=12
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    id=$(module_id "$path")
+    # if, а не «&&»: под set -e ложное условие в такой связке роняет keel
+    if (( ${#id} > w )); then w=${#id}; fi
+  done < <(modules_find "$filter")
+  printf '%s' "$w"
+}
+
 _module_status_line() {
-  local id=$1 rc=$2 title=$3
+  local id=$1 rc=$2 title=$3 mark color
   case "$rc" in
-    "$KEEL_RC_OK")      printf '%s✓%s %-18s %s\n' "$C_GREEN"  "$C_RESET" "$id" "$title" ;;
-    "$KEEL_RC_CHANGES") printf '%s→%s %-18s %s\n' "$C_BLUE"   "$C_RESET" "$id" "$title" ;;
-    "$KEEL_RC_SKIP")    printf '%s·%s %-18s %s\n' "$C_DIM"    "$C_RESET" "$id" "$title" ;;
-    *)                  printf '%s✗%s %-18s %s\n' "$C_RED"    "$C_RESET" "$id" "$title" ;;
+    "$KEEL_RC_OK")      mark='✓'; color=$C_GREEN ;;
+    "$KEEL_RC_CHANGES") mark='→'; color=$C_BLUE ;;
+    "$KEEL_RC_SKIP")    mark='·'; color=$C_DIM ;;
+    *)                  mark='✗'; color=$C_RED ;;
   esac
+  # pad, а не %-*s: printf считает байты, а не символы, и на русских
+  # заголовках выравнивание по ширине поля разъехалось бы снова
+  printf '%s%s%s %s %s\n' "$color" "$mark" "$C_RESET" "$(pad "$id" "$KEEL_PLAN_IDW")" "$title"
 }
 
 # --- План --------------------------------------------------------------------
@@ -75,6 +95,7 @@ _modules_scan() {
   local n_ok=0 n_skip=0 n_err=0
 
   KEEL_PLAN_PATHS=(); KEEL_PLAN_RCS=(); KEEL_PLAN_CHANGES=0
+  KEEL_PLAN_IDW=$(_modules_id_width "$filter")
 
   while IFS= read -r path; do
     [[ -n "$path" ]] || continue
@@ -91,7 +112,7 @@ _modules_scan() {
       *)                  n_err=$(( n_err + 1 )) ;;
     esac
     if [[ -n "$out" ]]; then
-      printf '%s\n' "$out" | sed 's/^/     /'
+      printf '%s\n' "$out" | sed 's/^/    /'
     fi
   done < <(modules_find "$filter")
 
@@ -237,7 +258,7 @@ modules_verify() {
     rc=0; out=$(module_invoke "$path" verify 2>&1) || rc=$?
     _module_status_line "$id" "$rc" "$title"
     if [[ -n "$out" ]]; then
-      printf '%s\n' "$out" | sed 's/^/     /'
+      printf '%s\n' "$out" | sed 's/^/    /'
     fi
   done < <(modules_find "$filter")
   return 0

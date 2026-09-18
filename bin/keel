@@ -81,7 +81,7 @@ keel — сборка и восстановление хоста Proxmox VE.
   --guest ID       только эти гости, через запятую: --guest 201 или 200,201
                    (в меню то же самое — галочками)
   --manifest PATH  другой файл манифеста
-  --plain          без псевдографики, обычным текстом
+  --plain          без цвета (для логов, вывода в файл и монохромных консолей)
 
 Порядок, который экономит нервы:
   keel doctor  →  keel plan  →  keel apply
@@ -91,12 +91,12 @@ EOF
 parse_args() {
   local positional=()
   while (( $# )); do
-    # shellcheck disable=SC2034  # KEEL_UI читается в lib/ui.sh
+    # shellcheck disable=SC2034  # KEEL_COLOR читается в lib/core.sh
     case "$1" in
       --yes|-y)   KEEL_MODE="yes" ;;
       --step)     KEEL_MODE="step" ;;
       --dry-run)  KEEL_MODE="dry" ;;
-      --plain)    KEEL_UI="plain" ;;
+      --plain)    KEEL_COLOR="off" ;;
       --only)     shift; KEEL_ONLY=${1:-} ;;
       --guest)    shift; KEEL_GUESTS_ONLY="${KEEL_GUESTS_ONLY:+${KEEL_GUESTS_ONLY},}${1:-}" ;;
       --manifest) shift; KEEL_MANIFEST=${1:-} ;;
@@ -263,11 +263,9 @@ pick_modules() {
 menu_loop() {
   while true; do
     local choice
-    # Нумерация пунктов здесь не пишется руками: в окне newt по списку ходят
-    # стрелками, а в текстовом режиме ui_menu нумерует сам. Раньше номера
-    # стояли в подписях и в текстовом режиме шли вторым столбцом цифр.
-    choice=$(ui_menu "keel ${KEEL_VERSION}" \
-      "Хост: $(hostname 2>/dev/null || echo '?')    Режим: $(keel_mode_title)" \
+    # Номера пунктов не пишутся руками: их проставляет ui_menu
+    choice=$(ui_menu \
+      "keel ${KEEL_VERSION} · $(hostname 2>/dev/null || echo '?') · $(keel_mode_title)" "" \
       plan    "Показать план — ничего не меняет" \
       apply   "Применить всё из манифеста" \
       pick    "Выбрать отдельные модули" \
@@ -280,28 +278,24 @@ menu_loop() {
       logs    "Логи последнего запуска" \
       quit    "Выход")
 
+    # Паузы «нажми любую клавишу» здесь больше нет. Она нужна была окну newt,
+    # которое перерисовывало экран поверх вывода: не задержишь — и результат
+    # исчезнет, не успев прочитаться. Текст никуда не девается, меню просто
+    # печатается следом, а всё сказанное остаётся выше по прокрутке.
     case "$choice" in
-      plan)   modules_plan "$KEEL_ONLY";   _pause ;;
-      apply)  modules_apply "$KEEL_ONLY";  _pause ;;
-      pick)   pick_modules;                _pause ;;
-      vms)    need_root; pick_guests vm  "Виртуальные машины";  _pause ;;
-      cts)    need_root; pick_guests lxc "Контейнеры LXC";      _pause ;;
-      verify) modules_verify "$KEEL_ONLY"; _pause ;;
-      doctor) doctor_run;                  _pause ;;
-      backup) need_root; modules_apply host/90-config-backup; _pause ;;
-      extern) need_root; external_menu;     _pause ;;
+      plan)   modules_plan "$KEEL_ONLY" ;;
+      apply)  modules_apply "$KEEL_ONLY" ;;
+      pick)   pick_modules ;;
+      vms)    need_root; pick_guests vm  "Виртуальные машины" ;;
+      cts)    need_root; pick_guests lxc "Контейнеры LXC" ;;
+      verify) modules_verify "$KEEL_ONLY" ;;
+      doctor) doctor_run ;;
+      backup) need_root; modules_apply host/90-config-backup ;;
+      extern) need_root; external_menu ;;
       logs)   show_logs ;;
       quit|"") return 0 ;;
     esac
   done
-}
-
-_pause() {
-  if ui_has_whiptail; then
-    printf '\n'
-    read -r -n1 -p "Нажми любую клавишу, чтобы вернуться в меню..." _ </dev/tty || true
-    printf '\n'
-  fi
 }
 
 main() {

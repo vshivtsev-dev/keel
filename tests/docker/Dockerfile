@@ -3,7 +3,7 @@
 # Основа — Debian 13 (Trixie), то же, на чём стоит Proxmox VE 9. Это не
 # косметика: именно здесь проверяются допущения об окружении, ради которых
 # и выбирался JSON вместо YAML — есть ли perl с JSON::PP, работает ли
-# режим relaxed, на месте ли whiptail, как называется локаль C.UTF-8.
+# режим relaxed и как называется локаль C.UTF-8.
 #
 # Настоящие qm/pct/pvesm/pvesh внутрь не ставятся и не нужны: тесты
 # подменяют их заглушками, которые записывают свои аргументы.
@@ -16,7 +16,6 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       bash \
       perl \
-      whiptail \
       shellcheck \
       xz-utils \
       tar \
