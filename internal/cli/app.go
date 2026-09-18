@@ -62,6 +62,8 @@ func Registry() *provider.Registry {
 		host.Repos{},
 		host.Updates{},
 		host.Storage{},
+		host.Backup{},
+		host.ConfigBackup{},
 	)
 }
 
@@ -93,6 +95,17 @@ func (a *App) LoadManifest() (*manifest.Manifest, error) {
 
 func (a *App) Facts(ctx context.Context) *facts.Facts {
 	return facts.Collect(ctx, a.Paths, a.Capturer)
+}
+
+// FactsFor добирает то, что зависит от манифеста: каталог с копиями
+// конфигурации задаётся им, а не известен заранее, как прочие места
+// на хосте.
+func (a *App) FactsFor(ctx context.Context, m *manifest.Manifest) *facts.Facts {
+	f := a.Facts(ctx)
+	if cb := m.Host.ConfigBackup; cb != nil {
+		f.ConfigArchivesIn(a.Paths.Sys, cb.Path)
+	}
+	return f
 }
 
 // Providers сужает набор провайдеров флагом --only.

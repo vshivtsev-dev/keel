@@ -46,6 +46,18 @@ type Provider interface {
 	Verify(ctx context.Context, m *manifest.Manifest, f *facts.Facts) ([]plan.Finding, error)
 }
 
+// Reporter — провайдер, которому есть что сказать даже тогда, когда в
+// манифесте про его область ничего не сказано.
+//
+// Правило нуля запрещает молча что-то делать, но не обязывает молчать.
+// Убрали раздел backup из манифеста, а задание на хосте осталось — keel
+// его не удалит, но и промолчать о нём не должен: оно продолжит
+// запускаться по расписанию, и через полгода будет непонятно, кто его
+// завёл.
+type Reporter interface {
+	NotesWhenUnconfigured(m *manifest.Manifest, f *facts.Facts) []plan.Note
+}
+
 // Registry — набор провайдеров в порядке применения. Порядок важен:
 // хранилища заводятся раньше гостей, которые на них лягут.
 type Registry struct {

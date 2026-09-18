@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vshivtsev-dev/keel/internal/exec"
 	"github.com/vshivtsev-dev/keel/internal/paths"
@@ -42,6 +43,7 @@ type Facts struct {
 	Storages   []Storage
 	Guests     []Guest
 	AptSources []AptSource
+	BackupJobs []BackupJob
 	// Keyring — ключ, которым подписаны пакеты Proxmox. Путь зависит от
 	// версии PVE, и угадывать его нельзя: не тот ключ — apt отвергнет
 	// репозиторий целиком.
@@ -63,6 +65,19 @@ type Facts struct {
 	UpgradeBytes int64
 	// RebootRequired — система просит перезагрузку. keel её не делает.
 	RebootRequired bool
+
+	// ConfigArchives — уже сделанные копии конфигурации, свежая первой.
+	ConfigArchives []Archive
+
+	// SysForPaths — как отображаются системные пути. Держится в фактах,
+	// чтобы провайдер мог спросить «а что из этого есть на хосте», не
+	// зная про песочницу и не трогая файловую систему сам.
+	SysForPaths func(string) string `json:"-"`
+
+	// Report — текстовый снимок хоста: то, чего нет в конфигах, но что
+	// очень нужно знать при сборке машины заново. Кладётся в архив
+	// конфигурации рядом с файлами.
+	Report string
 }
 
 type GPU struct {
@@ -108,6 +123,9 @@ func Collect(ctx context.Context, p paths.Paths, c exec.Capturer) *Facts {
 	f.collectBridges(ctx, c)
 	f.collectAPT(ctx, p, c)
 	f.collectAptSources(p.Sys)
+	f.collectBackupJobs(ctx, c)
+	f.Report = buildReport(ctx, c)
+	f.SysForPaths = p.Sys
 	f.Keyring = findKeyring(p, f.Codename)
 	return f
 }
@@ -417,6 +435,61 @@ func firstErrorLines(text string) string {
 	return strings.Join(out, "\n")
 }
 
+// Archive — копия конфигурации хоста, лежащая на диске.
+type Archive struct {
+	Path string
+	Age  time.Duration
+}
+
+// ConfigArchivesIn читает каталог с копиями конфигурации, свежая первой.
+// Вызывается отдельно: путь к нему задаётся манифестом, а не известен
+// заранее, как прочие места на хосте.
+func (f *Facts) ConfigArchivesIn(sys func(string) string, dir string) {
+	f.ConfigArchives = nil
+	if dir == "" {
+		return
+	}
+	now := time.Now()
+	for _, path := range glob(filepath.Join(sys(dir), "keel-host-*.tar.gz")) {
+		st, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		f.ConfigArchives = append(f.ConfigArchives, Archive{
+			Path: filepath.Join(dir, filepath.Base(path)),
+			Age:  now.Sub(st.ModTime()),
+		})
+	}
+	sort.Slice(f.ConfigArchives, func(i, j int) bool {
+		return f.ConfigArchives[i].Age < f.ConfigArchives[j].Age
+	})
+}
+
+// ConfigPaths — что именно кладётся в архив. Пути относительно корня,
+// несуществующие пропускаются молча: на разных хостах набор разный.
+func (f *Facts) ConfigPaths(sys func(string) string) []string {
+	if sys == nil {
+		sys = func(s string) string { return s }
+	}
+	candidates := []string{
+		"etc/pve",
+		"etc/network/interfaces", "etc/network/interfaces.d",
+		"etc/hosts", "etc/hostname", "etc/resolv.conf", "etc/fstab",
+		"etc/apt/sources.list", "etc/apt/sources.list.d",
+		"etc/default/grub", "etc/kernel/cmdline",
+		"etc/modules", "etc/modprobe.d",
+		"etc/vzdump.conf", "etc/ssh/sshd_config", "etc/ssh/sshd_config.d",
+		"root/.ssh/authorized_keys",
+	}
+	var out []string
+	for _, p := range candidates {
+		if _, err := os.Stat(sys("/" + p)); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // Storage находит хранилище по имени.
 func (f *Facts) Storage(name string) *Storage {
 	for i := range f.Storages {
@@ -453,6 +526,10 @@ func (f *Facts) Digest() string {
 	}
 	for _, g := range f.GPUs {
 		parts = append(parts, "gpu:"+g.Address+":"+g.Driver)
+	}
+	for _, b := range f.BackupJobs {
+		parts = append(parts, "backup:"+b.ID+":"+b.Comment+":"+b.Schedule+":"+b.Storage+
+			":"+b.Mode+":"+b.VMID+":"+strconv.FormatBool(b.All.Bool()))
 	}
 	for _, a := range f.AptSources {
 		parts = append(parts, "apt:"+a.Path+":"+strings.Join(a.Components, ",")+":"+

@@ -80,6 +80,8 @@ type CloudInit struct {
 
 type Backup struct {
 	Schedule string `json:"schedule"`
+	// All — копировать всех гостей хоста, а не только перечисленных.
+	All      *bool  `json:"all"`
 	Storage  string `json:"storage"`
 	Mode     string `json:"mode"`
 	Guests   []int  `json:"guests"`

@@ -29,7 +29,7 @@ func Apply(ctx context.Context, a *App, planPath string) error {
 	if err != nil {
 		return err
 	}
-	f := a.Facts(ctx)
+	f := a.FactsFor(ctx, m)
 	if err := NeedPVE(f, a.Paths); err != nil {
 		return err
 	}

@@ -93,6 +93,9 @@ func (e *Engine) Collect(
 
 		if !pr.Configured(m) {
 			r.Status = StatusUnconfigured
+			if rep, ok := pr.(provider.Reporter); ok {
+				r.Notes = rep.NotesWhenUnconfigured(m, f)
+			}
 			results = append(results, r)
 			continue
 		}

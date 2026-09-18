@@ -26,7 +26,7 @@ func Plan(ctx context.Context, a *App) error {
 		return err
 	}
 
-	p, results := eng.Collect(ctx, m, a.Facts(ctx))
+	p, results := eng.Collect(ctx, m, a.FactsFor(ctx, m))
 
 	if a.Opts.JSON {
 		enc := json.NewEncoder(a.Out)
@@ -138,7 +138,7 @@ func Verify(ctx context.Context, a *App) error {
 		return err
 	}
 
-	results := eng.Verify(ctx, m, a.Facts(ctx))
+	results := eng.Verify(ctx, m, a.FactsFor(ctx, m))
 
 	if a.Opts.JSON {
 		enc := json.NewEncoder(a.Out)
