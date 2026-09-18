@@ -56,6 +56,8 @@ func Apply(ctx context.Context, a *App, planPath string) error {
 		DryRun:    a.Opts.Mode == ModeDry,
 		BackupDir: a.Paths.Backups(),
 		Sys:       a.Paths.Sys,
+		Sandboxed: a.Paths.Sandboxed(),
+		Guards:    guards(f),
 		Stamp:     time.Now().Format("2006-01-02_150405"),
 	}
 	if a.Opts.Mode == ModeStep {
@@ -63,6 +65,9 @@ func Apply(ctx context.Context, a *App, planPath string) error {
 	}
 
 	s.section("Применение")
+	if a.Paths.Sandboxed() {
+		s.warn("песочница", "KEEL_FS_ROOT="+a.Paths.FSRoot()+" — файлы уводятся в сторону, команды не выполняются")
+	}
 	rep := engine.Apply(ctx, runner, p)
 	report(a, s, rep)
 
@@ -173,6 +178,13 @@ func report(a *App, s *sheet, rep engine.ApplyReport) {
 		for _, st := range rep.Skipped {
 			s.indent(st.Summary)
 		}
+	}
+	// Не начатое по условию — это не сбой: keel отказался начинать, и хост
+	// остался цел. Мешать это со сбоями значило бы пугать там, где keel
+	// как раз сработал правильно.
+	for _, ge := range rep.Guarded {
+		s.warn("не начато", ge.Step.Summary)
+		s.indent(ge.Err.Error())
 	}
 	for _, fe := range rep.Failed {
 		s.bad("не удалось", fe.Step.Summary)

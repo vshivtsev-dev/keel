@@ -38,11 +38,31 @@ type Facts struct {
 	GPUs     []GPU
 	DRINodes []string
 
-	Bridges  []string
-	Storages []Storage
-	Guests   []Guest
+	Bridges    []string
+	Storages   []Storage
+	Guests     []Guest
+	AptSources []AptSource
+	// Keyring — ключ, которым подписаны пакеты Proxmox. Путь зависит от
+	// версии PVE, и угадывать его нельзя: не тот ключ — apt отвергнет
+	// репозиторий целиком.
+	Keyring string
 
 	Upgradable int
+	// Upgradables — имена пакетов, ждущих обновления.
+	Upgradables []string
+	// AptError — жалобы apt на списки источников. Нужны потому, что при
+	// битых источниках apt-get -s ничего не печатает, и «ноль обновлений»
+	// неотличим от «обновлять нечего».
+	AptError string
+	// UpgradeURI — первая ссылка из тех, что apt собирается скачать.
+	// Лучшая проба связи: файл точно существует и лежит ровно там, куда
+	// пойдёт обновление, — в отличие от любого выдуманного адреса.
+	UpgradeURI string
+	// UpgradeBytes — сколько всего предстоит скачать. Нужно, чтобы сказать
+	// человеку не «медленно», а «на такой скорости это займёт полтора часа».
+	UpgradeBytes int64
+	// RebootRequired — система просит перезагрузку. keel её не делает.
+	RebootRequired bool
 }
 
 type GPU struct {
@@ -86,7 +106,9 @@ func Collect(ctx context.Context, p paths.Paths, c exec.Capturer) *Facts {
 	f.collectStorages(p)
 	f.collectGuests(p)
 	f.collectBridges(ctx, c)
-	f.collectAPT(ctx, c)
+	f.collectAPT(ctx, p, c)
+	f.collectAptSources(p.Sys)
+	f.Keyring = findKeyring(p, f.Codename)
 	return f
 }
 
@@ -153,6 +175,22 @@ func bootloader(ctx context.Context, p paths.Paths, c exec.Capturer) string {
 		return "grub"
 	}
 	return "неизвестно"
+}
+
+// findKeyring ищет ключ Proxmox среди известных имён. Не нашли — берём
+// нынешнее: на свежем PVE 9 оно верное, а на чужом хосте ключа нет вовсе
+// и подставлять нечего.
+func findKeyring(p paths.Paths, codename string) string {
+	candidates := []string{"/usr/share/keyrings/proxmox-archive-keyring.gpg"}
+	if codename != "" {
+		candidates = append(candidates, "/usr/share/keyrings/proxmox-release-"+codename+".gpg")
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(p.Sys(c)); err == nil {
+			return c
+		}
+	}
+	return candidates[0]
 }
 
 func (f *Facts) collectCPU(p paths.Paths) {
@@ -313,19 +351,70 @@ func (f *Facts) collectBridges(ctx context.Context, c exec.Capturer) {
 }
 
 // collectAPT только моделирует обновление (-s) и ничего не ставит.
-func (f *Facts) collectAPT(ctx context.Context, c exec.Capturer) {
+func (f *Facts) collectAPT(ctx context.Context, p paths.Paths, c exec.Capturer) {
+	if _, err := os.Stat(p.Sys("/var/run/reboot-required")); err == nil {
+		f.RebootRequired = true
+	}
 	if !c.Has("apt-get") {
 		return
 	}
+
 	out, err := c.Capture(ctx, "apt-get", "-s", "dist-upgrade")
 	if err != nil {
+		// apt печатает жалобы на источники в stderr, а на stdout молчит —
+		// поэтому «ноль обновлений» и «apt не смог» надо различать явно.
+		f.AptError = firstErrorLines(err.Error())
 		return
 	}
 	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "Inst ") {
-			f.Upgradable++
+		name, ok := strings.CutPrefix(line, "Inst ")
+		if !ok {
+			continue
+		}
+		f.Upgradable++
+		if i := strings.IndexByte(name, ' '); i > 0 {
+			name = name[:i]
+		}
+		f.Upgradables = append(f.Upgradables, name)
+	}
+
+	if f.Upgradable == 0 {
+		return
+	}
+	if uris, err := c.Capture(ctx, "apt-get", "--print-uris", "-qq", "-y", "dist-upgrade"); err == nil {
+		f.UpgradeURI, f.UpgradeBytes = parseUpgradeURIs(uris)
+	}
+}
+
+// parseUpgradeURIs разбирает строки вида: 'ссылка' имя размер MD5Sum:…
+func parseUpgradeURIs(out string) (first string, total int64) {
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		uri := strings.Trim(fields[0], "'")
+		if first == "" {
+			first = uri
+		}
+		if n, err := strconv.ParseInt(fields[2], 10, 64); err == nil {
+			total += n
 		}
 	}
+	return first, total
+}
+
+func firstErrorLines(text string) string {
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "E:") {
+			out = append(out, strings.TrimSpace(line))
+		}
+	}
+	if len(out) == 0 {
+		return strings.TrimSpace(text)
+	}
+	return strings.Join(out, "\n")
 }
 
 // Storage находит хранилище по имени.
@@ -354,7 +443,8 @@ func (f *Facts) GuestExists(id int) bool {
 func (f *Facts) Digest() string {
 	var parts []string
 	parts = append(parts, f.Hostname, f.PVEVersion, f.RepoStyle, f.Bootloader,
-		strconv.FormatBool(f.IOMMU), strconv.Itoa(f.Upgradable))
+		strconv.FormatBool(f.IOMMU), strconv.Itoa(f.Upgradable),
+		strconv.FormatBool(f.RebootRequired))
 	for _, s := range f.Storages {
 		parts = append(parts, "storage:"+s.Name+":"+s.Type+":"+strings.Join(s.Content, ","))
 	}
@@ -363,6 +453,10 @@ func (f *Facts) Digest() string {
 	}
 	for _, g := range f.GPUs {
 		parts = append(parts, "gpu:"+g.Address+":"+g.Driver)
+	}
+	for _, a := range f.AptSources {
+		parts = append(parts, "apt:"+a.Path+":"+strings.Join(a.Components, ",")+":"+
+			strconv.FormatBool(a.Disabled))
 	}
 	return plan.Digest(parts...)
 }

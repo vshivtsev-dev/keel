@@ -245,3 +245,47 @@ func TestBackupFollowsSandbox(t *testing.T) {
 		t.Errorf("в копии не то, что было: %q", saved)
 	}
 }
+
+// KEEL_FS_ROOT должен быть настоящей песочницей, а не половинчатой.
+// Уводить в сторону файлы и при этом по-настоящему звать pvesm — худшее
+// из сочетаний: файлы лягут во временный каталог, а хост изменится
+// взаправду. В bash от этого спасали заглушки в PATH, то есть только
+// внутри тестов.
+func TestSandboxDoesNotRunCommands(t *testing.T) {
+	r, _, root := newRunner(t)
+	r.Sandboxed = true
+	r.Sys = func(p string) string { return filepath.Join(root, p) }
+
+	marker := filepath.Join(root, "команда-выполнилась")
+	step := plan.Step{ID: "x", Summary: "тронуть хост", Action: plan.ActionExec,
+		Cmd: []string{"touch", marker}}
+
+	if err := r.Do(context.Background(), step); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("в песочнице команда всё же выполнилась")
+	}
+	// Путь кириллический, поэтому Render его закавычит — так же, как это
+	// делала bash-версия: команду должно быть можно скопировать в терминал.
+	if got := r.Recorded(); len(got) != 1 || got[0] != Render(step.Cmd) {
+		t.Errorf("команда не записана: %v", got)
+	}
+}
+
+// А записи файлов в песочнице происходят по-настоящему — иначе проверять
+// было бы нечего.
+func TestSandboxStillWritesFiles(t *testing.T) {
+	r, _, root := newRunner(t)
+	r.Sandboxed = true
+	r.Sys = func(p string) string { return filepath.Join(root, p) }
+
+	step := plan.Step{ID: "w", Summary: "записать", Action: plan.ActionWrite,
+		Path: "/etc/apt/sources.list.d/pve.sources", Content: []byte("Types: deb\n")}
+	if err := r.Do(context.Background(), step); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "etc/apt/sources.list.d/pve.sources")); err != nil {
+		t.Errorf("файл в песочнице не записан: %v", err)
+	}
+}

@@ -59,6 +59,8 @@ type App struct {
 // именами файлов, как было в bash.
 func Registry() *provider.Registry {
 	return provider.NewRegistry(
+		host.Repos{},
+		host.Updates{},
 		host.Storage{},
 	)
 }

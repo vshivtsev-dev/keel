@@ -89,6 +89,14 @@ func printResults(s *sheet, results []engine.Result) {
 			s.change(r.Provider, r.Title)
 			for _, st := range r.Steps {
 				s.indent(st.Summary)
+				for _, g := range st.Guards {
+					if g.Why != "" {
+						s.indent("  перед этим: " + g.Why)
+					}
+				}
+				for _, u := range st.Unknown {
+					s.indent("  ? станет известно при выполнении: " + u)
+				}
 			}
 		case engine.StatusOK:
 			ok++

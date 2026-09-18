@@ -47,6 +47,13 @@ type Runner struct {
 	Confirm func(step plan.Step, body string) Decision
 	// DryRun показывает, но не выполняет.
 	DryRun bool
+	// Sandboxed — системные пути уведены в сторону (KEEL_FS_ROOT).
+	//
+	// В песочнице команды не выполняются, а записываются. Отображать
+	// пути и при этом по-настоящему звать pvesm было бы худшим из
+	// сочетаний: файлы легли бы во временный каталог, а хост изменился
+	// бы взаправду. Записанные команды доступны через Recorded.
+	Sandboxed bool
 	// BackupDir — куда класть копии файлов перед правкой.
 	BackupDir string
 	// Stamp помечает все копии одного запуска общей меткой времени.
@@ -54,6 +61,12 @@ type Runner struct {
 	// Interactive отдаёт терминал команде целиком. Возвращает nil, если
 	// не умеет, — тогда шаг выполняется обычным образом.
 	Interactive func(ctx context.Context, cmd *exec.Cmd) error
+
+	recorded []string
+	// Guards — как проверять условия перед шагом. Ключ не найден —
+	// условие считается невыполнимым, и шаг пропускается: молча выполнить
+	// шаг, условие которого некому проверить, хуже, чем не выполнить.
+	Guards map[plan.GuardKind]GuardFunc
 	// Sys отображает системные пути. В обычной работе это тождество, но
 	// при заданном KEEL_FS_ROOT всё уезжает во временный каталог.
 	//
@@ -64,12 +77,28 @@ type Runner struct {
 	Sys func(string) string
 }
 
+// Recorded — команды, выполненные или записанные в песочнице, по порядку.
+func (r *Runner) Recorded() []string { return r.recorded }
+
 func (r *Runner) sys(path string) string {
 	if r.Sys == nil {
 		return path
 	}
 	return r.Sys(path)
 }
+
+// GuardFunc проверяет условие. Возвращает причину отказа; пустая строка —
+// условие выполнено.
+type GuardFunc func(ctx context.Context, arg string) string
+
+// ErrGuarded возвращается, когда шаг не выполнен из-за условия. Это не
+// сбой: keel отказался начинать, и хост остался цел.
+type ErrGuarded struct {
+	Step plan.Step
+	Why  string
+}
+
+func (e *ErrGuarded) Error() string { return e.Why }
 
 // Do выполняет один шаг плана.
 func (r *Runner) Do(ctx context.Context, step plan.Step) error {
@@ -97,6 +126,17 @@ func (r *Runner) Do(ctx context.Context, step plan.Step) error {
 		default:
 			r.logf("ПРЕРВАНО на шаге: %s", step.Summary)
 			return ErrAborted
+		}
+	}
+
+	for _, g := range step.Guards {
+		check, ok := r.Guards[g.Kind]
+		if !ok {
+			return &ErrGuarded{Step: step, Why: "некому проверить условие «" + string(g.Kind) + "»"}
+		}
+		if why := check(ctx, g.Arg); why != "" {
+			r.logf("НЕ НАЧАТО: %s — %s", step.Summary, why)
+			return &ErrGuarded{Step: step, Why: why}
 		}
 	}
 
@@ -137,6 +177,13 @@ func (r *Runner) body(step plan.Step) (string, error) {
 
 func (r *Runner) doExec(ctx context.Context, step plan.Step) error {
 	r.announce(step, "")
+	r.recorded = append(r.recorded, Render(step.Cmd))
+
+	if r.Sandboxed {
+		r.logf("В ПЕСОЧНИЦЕ, не выполняю: %s", Render(step.Cmd))
+		return nil
+	}
+
 	cmd := exec.CommandContext(ctx, step.Cmd[0], step.Cmd[1:]...)
 
 	if step.Interactive && r.Interactive != nil {

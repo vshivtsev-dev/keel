@@ -184,6 +184,9 @@ func (e *Engine) Verify(
 type ApplyReport struct {
 	Done    []plan.Step
 	Skipped []plan.Step
+	// Guarded — шаги, которые keel отказался начинать: условие не
+	// выполнилось. Это не сбой, и в ошибку применения они не идут.
+	Guarded []StepError
 	Failed  []StepError
 	Aborted bool
 }
@@ -213,12 +216,19 @@ func Apply(ctx context.Context, r *exec.Runner, p *plan.Plan) ApplyReport {
 		}
 
 		err := r.Do(ctx, step)
+		var guarded *exec.ErrGuarded
 		switch {
 		case err == nil:
 			rep.Done = append(rep.Done, step)
 		case errors.Is(err, exec.ErrAborted):
 			rep.Aborted = true
 			return rep
+		case errors.As(err, &guarded):
+			// Условие не выполнилось — шаг не начат. Зависимые шаги тоже
+			// выполнять нельзя: ставить обновления, список которых не
+			// обновился, — не то же самое, что не ставить их вовсе.
+			rep.Guarded = append(rep.Guarded, StepError{Step: step, Err: err})
+			failed[step.ID] = true
 		default:
 			rep.Failed = append(rep.Failed, StepError{Step: step, Err: err})
 			failed[step.ID] = true
