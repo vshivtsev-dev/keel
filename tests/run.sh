@@ -681,7 +681,7 @@ test_guests_reports_drift_without_fixing() {
 
 test_guests_haos_vm_commands() {
   _fake_guest_host
-  _seed_image_cache "haos_ova-14.2.qcow2"
+  _seed_image_cache "haos_ova-18.2.qcow2"
   printf '{ "guests": [ { "id": 100, "name": "haos", "profile": "haos", "storage": "local-lvm", "disk": "32G", "start_on_boot": true } ] }' >"${T}/m.json"
   config_load "${T}/m.json"
 
@@ -693,7 +693,7 @@ test_guests_haos_vm_commands() {
   assert_ran "--machine q35"
   assert_ran "--bios ovmf"
   assert_ran "--efidisk0 local-lvm:0,efitype=4m,pre-enrolled-keys=0"
-  assert_ran "import-from=${KEEL_STATE_DIR}/images/haos_ova-14.2.qcow2"
+  assert_ran "import-from=${KEEL_STATE_DIR}/images/haos_ova-18.2.qcow2"
   assert_ran "qm set 100 --boot order=scsi0"
   assert_ran "qm resize 100 scsi0 32G"
   assert_ran "--onboot 1"
@@ -1523,6 +1523,176 @@ EOF
   fi
 }
 
+
+# --- Образ по факту, а не по шаблону -----------------------------------------
+#
+# На живом хосте keel спросил у GitHub последнюю версию (18.3), собрал адрес по
+# шаблону и упёрся в 404: файла с таким именем наверху не оказалось. 404 — это
+# определённый ответ «такого нет», а не сбой связи, и повторять его бессмысленно.
+
+# curl, который отвечает отказом на одни адреса и согласием на другие.
+# Первый аргумент keel'овского url_exists — флаги, поэтому решение принимаем
+# по последнему аргументу: это и есть проверяемый адрес.
+_curl_says_404_for() {
+  local bad=$1
+  stub_commands curl
+  cat >"${T}/bin/curl" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "curl \$*" >> "\$KEEL_STUB_LOG"
+for a in "\$@"; do url="\$a"; done
+case "\$url" in
+  *${bad}*) exit 22 ;;
+esac
+if [[ -f "\$KEEL_STUB_OUT/curl" ]]; then cat "\$KEEL_STUB_OUT/curl"; fi
+exit 0
+STUB
+  chmod +x "${T}/bin/curl"
+}
+
+test_image_falls_back_when_version_missing() {
+  _fake_guest_host
+  _curl_says_404_for "18.9"
+  _seed_image_cache "haos_ova-18.2.qcow2"
+  stub_says "curl" <<'EOF'
+{ "tag_name": "18.9", "assets": [] }
+EOF
+  printf '{ "guests": [ { "id": 100, "name": "haos", "profile": "haos", "storage": "local-lvm" } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+  local out; out=$(mod_out guests/50-guests apply)
+
+  assert_contains "$out" "беру запасную 18.2"
+  assert_ran "haos_ova-18.2.qcow2"
+  assert_ran "qm create 100"
+}
+
+test_image_names_every_url_it_tried() {
+  _fake_guest_host
+  _curl_says_404_for "haos_ova"        # ни один адрес не живой
+  stub_says "curl" <<'EOF'
+{ "tag_name": "18.9", "assets": [] }
+EOF
+  printf '{ "guests": [ { "id": 100, "name": "haos", "profile": "haos" } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+  local out; out=$(mod_out guests/50-guests apply)
+
+  assert_contains "$out" "Не нашёл ни одного живого адреса"
+  assert_contains "$out" "haos_ova-18.9"      # назван и тот, что искали
+  assert_contains "$out" "haos_ova-18.2"      # и запасной
+  assert_not_ran "qm create"
+}
+
+test_image_takes_name_from_github_answer() {
+  _fake_guest_host
+  _seed_image_cache "haos_ova-19.0.qcow2"
+  stub_says "curl" <<'EOF'
+{ "tag_name": "19.0",
+  "assets": [
+    { "name": "haos_generic-x86-64-19.0.img.xz", "browser_download_url": "https://example.invalid/generic.img.xz" },
+    { "name": "haos_ova-19.0.qcow2.xz", "browser_download_url": "https://example.invalid/haos_ova-19.0.qcow2.xz" }
+  ] }
+EOF
+  printf '{ "guests": [ { "id": 100, "name": "haos", "profile": "haos" } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+  mod_rc guests/50-guests apply >/dev/null
+
+  # Ссылка взята из ответа GitHub, а не собрана из шаблона
+  assert_ran "https://example.invalid/haos_ova-19.0.qcow2.xz"
+  assert_ran "qm create 100"
+}
+
+test_image_version_from_manifest_wins() {
+  _fake_guest_host
+  _seed_image_cache "haos_ova-17.5.qcow2"
+  stub_says "curl" <<'EOF'
+{ "tag_name": "19.0", "assets": [] }
+EOF
+  printf '{ "guests": [ { "id": 100, "name": "haos", "profile": "haos", "image_version": "17.5" } ] }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  export KEEL_MODE="yes"
+  mod_rc guests/50-guests apply >/dev/null
+
+  assert_ran "haos_ova-17.5.qcow2"
+  if stub_log | grep -q "haos_ova-19.0"; then
+    fail "версия из манифеста должна перекрывать ответ GitHub"
+  fi
+}
+
+# --- Выбор гостей ------------------------------------------------------------
+
+_manifest_two_kinds() {
+  cat >"${T}/m.json" <<'EOF'
+{ "guests": [
+  { "id": 100, "name": "haos",    "profile": "haos" },
+  { "id": 101, "name": "desktop", "profile": "desktop", "graphics": "dri",
+    "cloudinit": { "user": "av" } }
+] }
+EOF
+  config_load "${T}/m.json"
+}
+
+test_guest_filter_creates_only_chosen() {
+  _fake_guest_host
+  _manifest_two_kinds
+  export KEEL_MODE="yes" KEEL_GUESTS_ONLY="101"
+  mod_rc guests/50-guests apply >/dev/null
+
+  assert_ran "pct create 101"
+  assert_not_ran "qm create"
+}
+
+test_guest_filter_says_who_was_skipped() {
+  _fake_guest_host
+  _manifest_two_kinds
+  export KEEL_GUESTS_ONLY="101"
+  local out; out=$(mod_out guests/50-guests check)
+  assert_contains "$out" "пропущено по выбору"
+  assert_contains "$out" "101"
+}
+
+test_guest_kind_splits_vm_and_lxc() {
+  _fake_guest_host
+  _manifest_two_kinds
+  assert_eq "$(guest_kind 0)" "vm"  "haos — виртуальная машина"
+  assert_eq "$(guest_kind 1)" "lxc" "рабочий стол — контейнер"
+}
+
+
+# Предупреждение о задании обязано давать выход, а не только констатацию:
+# id, место в интерфейсе и готовую команду.
+test_backup_warning_tells_how_to_remove() {
+  stub_commands pvesh
+  stub_says "pvesh.get" <<'EOF'
+[{"all":1,"enabled":1,"id":"backup-чужое-0104","schedule":"sun 01:00","storage":"local","type":"vzdump"}]
+EOF
+  printf '{ "backup": { "schedule": "02:00", "storage": "local", "guests": [200, 201] } }' >"${T}/m.json"
+  config_load "${T}/m.json"
+  local out; out=$(mod_out host/40-backup-jobs check)
+
+  assert_contains "$out" "backup-чужое-0104"
+  assert_contains "$out" "pvesh delete /cluster/backup/backup-чужое-0104"
+  assert_contains "$out" "Резервная копия"
+}
+
+# Ключ backup убрали, а задание keel осталось — про него надо сказать,
+# но удалять молча нельзя.
+test_backup_reports_orphan_job() {
+  stub_commands pvesh
+  stub_says "pvesh.get" <<'EOF'
+[{"comment":"keel","enabled":1,"id":"d34ad502-keel","schedule":"02:00","storage":"local","type":"vzdump","vmid":"200,201"}]
+EOF
+  printf '{ "host": { "updates": false } }' >"${T}/m.json"
+  config_load "${T}/m.json"
+
+  assert_eq "$(mod_rc host/40-backup-jobs check)" "20" "без ключа модуль не работает"
+  local out; out=$(mod_out host/40-backup-jobs check)
+  assert_contains "$out" "задание keel на хосте осталось"
+  assert_contains "$out" "pvesh delete /cluster/backup/d34ad502-keel"
+  assert_not_ran "pvesh delete"
+}
+
 # --- Запуск ------------------------------------------------------------------
 
 printf '\nОкружение\n'
@@ -1588,6 +1758,8 @@ it "backup: создаёт задание"                    test_backup_create
 it "backup: обновляет своё задание"             test_backup_updates_existing_job
 it "backup: совпадающее не трогает"             test_backup_matching_job_is_left_alone
 it "backup: не присваивает чужие задания"       test_backup_ignores_foreign_jobs
+it "backup: говорит, как убрать чужое задание"  test_backup_warning_tells_how_to_remove
+it "backup: сообщает о брошенном своём"         test_backup_reports_orphan_job
 
 printf '\nФаза 2: гости\n'
 it "guests: профиль по роли и графике"          test_guests_profile_resolution
@@ -1596,6 +1768,13 @@ it "guests: все профили валидны"                test_guests_all
 it "guests: существующего не трогает"           test_guests_existing_is_never_touched
 it "guests: сообщает о расхождениях, не правит" test_guests_reports_drift_without_fixing
 it "guests: команды создания HAOS"              test_guests_haos_vm_commands
+it "guests: нет версии — берём запасную"        test_image_falls_back_when_version_missing
+it "guests: называет все адреса, что пробовал"  test_image_names_every_url_it_tried
+it "guests: имя файла из ответа GitHub"         test_image_takes_name_from_github_answer
+it "guests: версия из манифеста главнее"        test_image_version_from_manifest_wins
+it "guests: ставится только выбранный"          test_guest_filter_creates_only_chosen
+it "guests: говорит, кого пропустил"            test_guest_filter_says_who_was_skipped
+it "guests: машины и контейнеры различаются"    test_guest_kind_splits_vm_and_lxc
 it "guests: команды создания ВМ с cloud-init"   test_guests_cloudinit_vm_commands
 it "guests: без snippets честно отказывается"   test_guests_cloudinit_needs_snippets_storage
 it "guests: команды создания LXC с /dev/dri"    test_guests_lxc_desktop_commands

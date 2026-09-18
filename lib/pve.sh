@@ -230,6 +230,15 @@ net_download_speed() {
   printf '%s' "$out"
 }
 
+# Есть ли файл по ссылке. Тянем один байт, а не HEAD: часть зеркал и CDN
+# на HEAD отвечают отказом, и «нет ответа» неотличимо от «нет файла».
+url_exists() {
+  local url=$1
+  [[ -n "$url" ]] || return 1
+  command -v curl >/dev/null 2>&1 || return 0   # проверить нечем — не мешаем
+  curl -fsSL --max-time 20 --range 0-0 -o /dev/null "$url" 2>/dev/null   # keel:allow-direct один байт в /dev/null, проверка наличия
+}
+
 # "30K" → 30720, "2M" → 2097152, "4096" → 4096. Мусор → 0.
 speed_to_bytes() {
   local v=${1:-} n

@@ -55,7 +55,12 @@
     {
       "id": 100,
       "name": "haos",
-      "profile": "haos",           // Home Assistant OS, ВМ из образа
+      "profile": "haos",
+
+      // Закрепить версию образа вместо «последней». Без этого ключа keel
+      // спросит последний релиз у GitHub и возьмёт имя файла из ответа.
+      // "image_version": "18.2",
+           // Home Assistant OS, ВМ из образа
       "cores": 2,
       "memory": 4096,              // МБ
       "disk": "32G",

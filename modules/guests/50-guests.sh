@@ -27,10 +27,11 @@ mod_check() {
   local n; n=$(guests_count)
   (( n > 0 )) || return "$KEEL_RC_SKIP"
 
-  local changes=0 i id name
+  local changes=0 skipped=0 i id name
   for (( i = 0; i < n; i++ )); do
     id=$(config_get "guests.${i}.id")
     name=$(config_get "guests.${i}.name" "без имени")
+    if ! guest_selected "$id"; then skipped=$(( skipped + 1 )); continue; fi
     guest_prepare "$i" || return 1
 
     if guest_exists "$id"; then
@@ -41,6 +42,12 @@ mod_check() {
     guest_plan "$i" || return 1
     changes=1
   done
+
+  # Молчать о сужении нельзя: иначе «уже в порядке» читается как
+  # «все гости на месте», хотя половину мы даже не смотрели
+  if (( skipped > 0 )); then
+    printf 'пропущено по выбору: %s (--guest %s)\n' "$skipped" "$KEEL_GUESTS_ONLY"
+  fi
 
   (( changes )) && return "$KEEL_RC_CHANGES"
   return "$KEEL_RC_OK"
@@ -54,6 +61,7 @@ mod_apply() {
   for (( i = 0; i < n; i++ )); do
     id=$(config_get "guests.${i}.id")
     name=$(config_get "guests.${i}.name" "без имени")
+    guest_selected "$id" || continue
     guest_prepare "$i" || return 1
 
     if guest_exists "$id"; then
@@ -74,6 +82,7 @@ mod_verify() {
   for (( i = 0; i < n; i++ )); do
     id=$(config_get "guests.${i}.id")
     name=$(config_get "guests.${i}.name" "без имени")
+    guest_selected "$id" || continue
     if guest_exists "$id"; then
       printf '%s «%s»: на месте\n' "$id" "$name"
       guest_prepare "$i" >/dev/null 2>&1 && guest_report_drift "$i" "$id"

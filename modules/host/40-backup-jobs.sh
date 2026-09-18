@@ -103,10 +103,18 @@ _backup_diff() {
   return 0
 }
 
+# Как убрать задание. Печатается вместе с любым предупреждением о заданиях:
+# назвать проблему и не дать выхода — хуже, чем промолчать.
+_backup_how_to_remove() {
+  local id=$1
+  note "Убрать: Центр обработки данных → Резервная копия → выбрать → Удалить"
+  note "или командой: pvesh delete /cluster/backup/${id}"
+}
+
 # Чужое задание «все гости» перекрывает наше: те же гости поедут в копию
 # дважды. Трогать его нельзя — чужое, — но и молчать об этом не стоит.
 _backup_warn_overlap() {
-  local jobs n i comment sched
+  local jobs n i comment sched id
   jobs=$(backup_jobs_json)
   n=$(json_len "$jobs" "")
   for (( i = 0; i < n; i++ )); do
@@ -115,13 +123,32 @@ _backup_warn_overlap() {
     [[ "$(json_get "$jobs" "${i}.all" "0")" == "1" ]] || continue
     [[ "$(json_get "$jobs" "${i}.enabled" "1")" == "1" ]] || continue
     sched=$(json_get "$jobs" "${i}.schedule" "?")
-    warn "На хосте есть чужое задание «все гости» (${sched}). Гости из манифеста попадут в копию и по нему — дважды за период. keel это задание не трогает."
+    id=$(json_get "$jobs" "${i}.id" "?")
+    warn "На хосте есть чужое задание «все гости» (${sched}), id ${id}."
+    note "Гости из манифеста попадут в копию и по нему — дважды за период."
+    note "keel чужие задания не трогает — это решение за тобой."
+    _backup_how_to_remove "$id"
   done
   return 0
 }
 
+# Раздел backup убрали из манифеста, а задание keel осталось на хосте.
+# Правило нуля запрещает молча удалять, но молчать о брошенном задании
+# тоже нельзя: оно продолжит запускаться, и непонятно, кто его завёл.
+_backup_warn_orphan() {
+  local id; id=$(_backup_find_job)
+  [[ -n "$id" ]] || return 0
+  warn "В манифесте нет раздела backup, а задание keel на хосте осталось (id ${id})."
+  note "Оно продолжит запускаться по расписанию. keel сам его не удаляет: убрать ключ из манифеста — не то же самое, что попросить удалить."
+  _backup_how_to_remove "$id"
+  return 0
+}
+
 mod_check() {
-  _backup_configured || return "$KEEL_RC_SKIP"
+  if ! _backup_configured; then
+    _backup_warn_orphan
+    return "$KEEL_RC_SKIP"
+  fi
 
   # Предупреждение имеет смысл только если наше задание адресное
   if ! config_bool backup.all false && [[ -n "$(_backup_vmid_list)" ]]; then

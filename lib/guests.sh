@@ -15,6 +15,35 @@ KEEL_GUEST_SECRET=""   # сгенерированный пароль, если �
 
 guests_count() { config_len guests; }
 
+# --- Выбор гостей ------------------------------------------------------------
+#
+# По умолчанию keel делает всех, кто описан в манифесте. KEEL_GUESTS_ONLY
+# сужает список до перечисленных номеров: её заполняет флаг --guest и экраны
+# выбора в меню — одна дорога, а не две.
+KEEL_GUESTS_ONLY="${KEEL_GUESTS_ONLY:-}"
+
+guest_selected() {
+  local id=$1
+  [[ -n "$KEEL_GUESTS_ONLY" ]] || return 0
+  [[ ",${KEEL_GUESTS_ONLY}," == *",${id},"* ]]
+}
+
+# Есть ли вообще сужение
+guests_filtered() { [[ -n "$KEEL_GUESTS_ONLY" ]]; }
+
+# Род гостя: vm или lxc. Берётся из поля kind профиля — того же места,
+# которым род определяется при создании. Второго источника правды нет.
+guest_kind() {
+  local i=$1 kind
+  guest_prepare "$i" >/dev/null 2>&1 || { printf 'неизвестно'; return 0; }
+  kind=$(prof_get kind "")
+  case "$kind" in
+    lxc)      printf 'lxc' ;;
+    vm-*)     printf 'vm' ;;
+    *)        printf 'неизвестно' ;;
+  esac
+}
+
 # --- Разрешение профиля ------------------------------------------------------
 
 # Профиль «desktop» — это роль, а не реализация. Чем её закрыть, решает
@@ -65,17 +94,60 @@ disk_to_gb() {
 
 image_cache_dir() { printf '%s' "${KEEL_STATE_DIR}/images"; }
 
-# Последний тег релиза на GitHub. Только чтение; если не вышло — пусто.
-github_latest_tag() {
+# Ответ GitHub про последний релиз, целиком. За один запуск спрашиваем один
+# раз: дальше из этого же ответа берётся и версия, и имя файла.
+KEEL_GH_RELEASE_REPO=""
+KEEL_GH_RELEASE_JSON=""
+
+github_latest_release() {
   local repo=$1
+  [[ -n "$repo" ]] || return 0
+  if [[ "$repo" == "$KEEL_GH_RELEASE_REPO" ]]; then
+    printf '%s' "$KEEL_GH_RELEASE_JSON"
+    return 0
+  fi
   command -v curl >/dev/null 2>&1 || return 0
-  curl -fsSL --max-time 15 "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
-    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1   # keel:allow-direct чтение версии, ничего не качает
+  local out
+  out=$(curl -fsSL --max-time 15 "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null) || out=""   # keel:allow-direct чтение метаданных, ничего не качает
+  KEEL_GH_RELEASE_REPO=$repo
+  KEEL_GH_RELEASE_JSON=$out
+  printf '%s' "$out"
 }
 
-# Версия образа: либо явная, либо последний релиз, либо запасная из профиля
+# Последний тег релиза. Пусто — не дозвонились.
+github_latest_tag() {
+  local json; json=$(github_latest_release "$1")
+  [[ -n "$json" ]] || return 0
+  json_get "$json" tag_name ""
+}
+
+# Ссылка на файл релиза, чьё имя подходит под образец. Это надёжнее шаблона:
+# имя приходит от самого GitHub, а не собирается нами из версии в надежде, что
+# наверху ничего не переименовали. Пусто — не нашлось.
+github_release_asset() {
+  local repo=$1 pattern=$2 json n i name
+  [[ -n "$pattern" ]] || return 0
+  json=$(github_latest_release "$repo")
+  [[ -n "$json" ]] || return 0
+  n=$(json_len "$json" assets)
+  for (( i = 0; i < n; i++ )); do
+    name=$(json_get "$json" "assets.${i}.name" "")
+    [[ "$name" =~ $pattern ]] || continue
+    json_get "$json" "assets.${i}.browser_download_url" ""
+    return 0
+  done
+  return 0
+}
+
+# Версия образа: сначала манифест гостя, потом профиль, потом последний релиз,
+# потом запасная из профиля.
 image_version() {
-  local version; version=$(prof_get image.version "")
+  local i=${1:-}
+  local version=""
+  [[ -n "$i" ]] && version=$(config_get "guests.${i}.image_version" "")
+  [[ -n "$version" ]] && { printf '%s' "$version"; return 0; }
+
+  version=$(prof_get image.version "")
   [[ "$version" != "latest" ]] && { printf '%s' "$version"; return 0; }
 
   local repo tag
@@ -88,16 +160,72 @@ image_version() {
   prof_get image.fallback_version ""
 }
 
-image_url() {
-  local url tmpl version
+# Ссылка для конкретной версии
+image_url_for() {
+  local version=$1 url tmpl
   url=$(prof_get image.url "")
   [[ -n "$url" ]] && { printf '%s' "$url"; return 0; }
 
   tmpl=$(prof_get image.url_template "")
   [[ -n "$tmpl" ]] || return 1
-  version=$(image_version)
   [[ -n "$version" ]] || return 1
   printf '%s' "${tmpl//\$\{version\}/$version}"
+}
+
+image_url() { image_url_for "$(image_version "${1:-}")"; }
+
+# Ссылка на образ, про которую уже известно, что файл по ней есть.
+#
+# 404 от GitHub — это определённый ответ «такого файла нет», а не сбой связи:
+# повторять бессмысленно, надо брать другой адрес. Поэтому каждый кандидат
+# проверяется до начала закачки, а не выясняется на ней.
+image_resolve_url() {
+  local i=${1:-}
+  local tried=() url
+
+  # 1. Явная ссылка из профиля — её не оспариваем
+  url=$(prof_get image.url "")
+  if [[ -n "$url" ]]; then printf '%s' "$url"; return 0; fi
+
+  # 2. Имя файла из ответа GitHub
+  local pattern repo
+  pattern=$(prof_get image.asset_pattern "")
+  repo=$(prof_get image.github_repo "")
+  if [[ -n "$pattern" && -n "$repo" ]]; then
+    url=$(github_release_asset "$repo" "$pattern")
+    if [[ -n "$url" ]]; then
+      if url_exists "$url"; then printf '%s' "$url"; return 0; fi
+      tried+=("$url")
+    fi
+  fi
+
+  # 3. Шаблон с найденной версией
+  local version fallback
+  version=$(image_version "$i")
+  url=$(image_url_for "$version") || url=""
+  if [[ -n "$url" ]]; then
+    if url_exists "$url"; then printf '%s' "$url"; return 0; fi
+    tried+=("$url")
+  fi
+
+  # 4. Шаблон с запасной версией из профиля
+  fallback=$(prof_get image.fallback_version "")
+  if [[ -n "$fallback" && "$fallback" != "$version" ]]; then
+    url=$(image_url_for "$fallback") || url=""
+    if [[ -n "$url" ]] && url_exists "$url"; then
+      warn "Образа версии ${version} по ожидаемому адресу нет — беру запасную ${fallback}."
+      note "Закрепить версию можно ключом image_version у гостя в манифесте."
+      printf '%s' "$url"
+      return 0
+    fi
+    [[ -n "$url" ]] && tried+=("$url")
+  fi
+
+  err "Не нашёл ни одного живого адреса образа. Проверено:"
+  local t
+  for t in ${tried[@]+"${tried[@]}"}; do printf '    %s\n' "$t" >&2; done
+  (( ${#tried[@]} )) || printf '    (в профиле нет ни ссылки, ни шаблона)\n' >&2
+  return 1
 }
 
 # Скачать образ, если его ещё нет, и распаковать. Путь кладётся в
@@ -351,7 +479,7 @@ vm_create_from_image() {
   storage=$(guest_field "$i" storage local-lvm)
   disk=$(guest_field "$i" disk "")
 
-  url=$(image_url) || { err "В профиле ${KEEL_PROF_NAME} не собирается ссылка на образ"; return 1; }
+  url=$(image_resolve_url "$i") || return 1
   image_ensure "$url" "$(prof_get image.compressed none)" || return $?
 
   _vm_base_args "$i"
@@ -400,7 +528,7 @@ vm_create_cloudinit() {
 
   prof_bool needs_password && { guest_password "$id" "$name" || return $?; }
 
-  url=$(image_url) || { err "В профиле ${KEEL_PROF_NAME} нет ссылки на образ"; return 1; }
+  url=$(image_resolve_url "$i") || return 1
   image_ensure "$url" "$(prof_get image.compressed none)" || return $?
 
   _vm_base_args "$i"

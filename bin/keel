@@ -65,6 +65,7 @@ keel — сборка и восстановление хоста Proxmox VE.
   gpu revert  откатить проброс видеокарты
   password ID показать пароль, сгенерированный для гостя
   token [ИМЯ] показать сохранённый токен (по умолчанию cloudflared)
+  guests      список гостей из манифеста и их состояние
   external    внешние инструменты (community-scripts)
   modules     список модулей
   logs        показать последний лог
@@ -76,6 +77,8 @@ keel — сборка и восстановление хоста Proxmox VE.
                    (только после того, как посмотрел plan)
   --dry-run        ничего не выполнять, только показывать команды
   --only ID        работать с одним модулем, например: --only host/10-repos
+  --guest ID       только эти гости, через запятую: --guest 201 или 200,201
+                   (в меню то же самое — галочками)
   --manifest PATH  другой файл манифеста
   --plain          без псевдографики, обычным текстом
 
@@ -93,6 +96,7 @@ parse_args() {
       --dry-run)  KEEL_MODE="dry" ;;
       --plain)    KEEL_UI="plain" ;;
       --only)     shift; KEEL_ONLY=${1:-} ;;
+      --guest)    shift; KEEL_GUESTS_ONLY="${KEEL_GUESTS_ONLY:+${KEEL_GUESTS_ONLY},}${1:-}" ;;
       --manifest) shift; KEEL_MANIFEST=${1:-} ;;
       -h|--help)  usage; exit 0 ;;
       --*)        die "Неизвестный флаг: $1 (см. keel help)" ;;
@@ -152,6 +156,89 @@ show_logs() {
   fi
 }
 
+# Строки для списка гостей одного рода: id, имя, чем будет, состояние.
+# Печатает "id<TAB>подпись<TAB>on|off"; пусто — таких гостей в манифесте нет.
+guest_rows() {
+  local want=$1 n i id name kind title state flag
+  n=$(guests_count)
+  for (( i = 0; i < n; i++ )); do
+    id=$(config_get "guests.${i}.id")
+    [[ -n "$id" ]] || continue
+    # Профиль загружаем здесь, а не через $(guest_kind): подстановка —
+    # это подоболочка, и загруженный в ней профиль до нас не доживёт
+    guest_prepare "$i" >/dev/null 2>&1 || continue
+    case "$(prof_get kind "")" in
+      lxc)  kind=lxc ;;
+      vm-*) kind=vm ;;
+      *)    kind=неизвестно ;;
+    esac
+    [[ "$kind" == "$want" ]] || continue
+    name=$(config_get "guests.${i}.name" "без имени")
+    title=$(prof_get title "$(guest_profile_name "$i")")
+    if guest_exists "$id"; then
+      state="уже есть, не трону"; flag="off"
+    else
+      state="нет на хосте"; flag="on"
+    fi
+    printf '%s\t%s  %s  —  %s\t%s\n' "$id" "$(pad "$name" 16)" "$title" "$state" "$flag"
+  done
+}
+
+# Экран выбора гостей одного рода. Машины и контейнеры разведены нарочно:
+# в Proxmox это разные сущности с разными командами и разной ценой ошибки,
+# и в одном списке они выглядят обманчиво одинаково.
+pick_guests() {
+  local kind=$1 title=$2
+  local args=() id label flag
+  while IFS=$'\t' read -r id label flag; do
+    [[ -n "$id" ]] || continue
+    args+=("$id" "${id}  ${label}" "$flag")
+  done < <(guest_rows "$kind")
+
+  if (( ${#args[@]} == 0 )); then
+    ui_msgbox "$title" "В манифесте нет ни одного гостя этого рода.
+
+Добавь его в ${KEEL_MANIFEST} — и он появится здесь."
+    return 0
+  fi
+
+  local chosen
+  chosen=$(ui_checklist "$title" "Отметь, кого поставить:" "${args[@]}")
+  [[ -n "$chosen" ]] || return 0
+
+  local picked=() one
+  for one in $chosen; do
+    one=${one//\"/}
+    # Не «&&» последней строкой тела цикла: при пустом значении вся конструкция
+    # возвращает единицу, а под set -e это обрывает выполнение
+    if [[ -n "$one" ]]; then picked+=("$one"); fi
+  done
+  (( ${#picked[@]} )) || return 0
+
+  KEEL_GUESTS_ONLY=$(IFS=,; printf '%s' "${picked[*]}")
+  modules_apply guests/50-guests
+  KEEL_GUESTS_ONLY=""
+}
+
+# Тот же список, но печатью — когда меню недоступно или просто посмотреть
+show_guests() {
+  local kind label id row flag
+  for kind in vm lxc; do
+    case "$kind" in
+      vm)  label="Виртуальные машины" ;;
+      lxc) label="Контейнеры LXC" ;;
+    esac
+    head1 "$label"
+    local found=0
+    while IFS=$'\t' read -r id row flag; do
+      [[ -n "$id" ]] || continue
+      printf '  %s  %s\n' "$id" "$row"
+      found=1
+    done < <(guest_rows "$kind")
+    (( found )) || note "В манифесте таких нет."
+  done
+}
+
 pick_modules() {
   local args=() id title
   while IFS=$'\t' read -r id title; do
@@ -179,17 +266,21 @@ menu_loop() {
       plan    "1  Показать план — ничего не меняет" \
       apply   "2  Применить всё из манифеста" \
       pick    "3  Выбрать отдельные модули" \
-      verify  "4  Проверить соответствие манифесту" \
-      doctor  "5  Состояние хоста и видеокарты" \
-      backup  "6  Снять копию конфигурации хоста" \
-      extern  "7  Внешние инструменты (не часть манифеста)" \
-      logs    "8  Логи последнего запуска" \
+      vms     "4  Виртуальные машины — поставить по одной" \
+      cts     "5  Контейнеры LXC — поставить по одному" \
+      verify  "6  Проверить соответствие манифесту" \
+      doctor  "7  Состояние хоста и видеокарты" \
+      backup  "8  Снять копию конфигурации хоста" \
+      extern  "9  Внешние инструменты (не часть манифеста)" \
+      logs    "10 Логи последнего запуска" \
       quit    "0  Выход")
 
     case "$choice" in
       plan)   modules_plan "$KEEL_ONLY";   _pause ;;
       apply)  modules_apply "$KEEL_ONLY";  _pause ;;
       pick)   pick_modules;                _pause ;;
+      vms)    need_root; pick_guests vm  "Виртуальные машины";  _pause ;;
+      cts)    need_root; pick_guests lxc "Контейнеры LXC";      _pause ;;
       verify) modules_verify "$KEEL_ONLY"; _pause ;;
       doctor) doctor_run;                  _pause ;;
       backup) need_root; modules_apply host/90-config-backup; _pause ;;
@@ -214,6 +305,20 @@ main() {
   state_init
   config_load "$KEEL_MANIFEST"
 
+  # Опечатка в номере не должна выглядеть как «делать нечего»
+  if [[ -n "$KEEL_GUESTS_ONLY" ]]; then
+    local want have=() n i id
+    n=$(guests_count)
+    for (( i = 0; i < n; i++ )); do have+=("$(config_get "guests.${i}.id")"); done
+    for want in ${KEEL_GUESTS_ONLY//,/ }; do
+      id=" ${have[*]} "
+      [[ "$id" == *" ${want} "* ]] && continue
+      err "Гостя ${want} нет в манифесте."
+      note "Есть: ${have[*]:-(ни одного)}"
+      exit 1
+    done
+  fi
+
   case "$KEEL_CMD" in
     menu)     menu_loop ;;
     plan)     modules_plan "$KEEL_ONLY" ;;
@@ -226,6 +331,7 @@ main() {
     gpu)      gpu_command "${KEEL_ARGV[1]:-}" ;;
     password) show_password "${KEEL_ARGV[1]:-}" ;;
     token)    show_token "${KEEL_ARGV[1]:-}" ;;
+    guests)   show_guests ;;
     external) need_root; external_menu ;;
     modules)  modules_list_ids | column -t -s $'\t' 2>/dev/null || modules_list_ids ;;
     logs)     if [[ -f "$KEEL_LOG_FILE" ]]; then cat "$KEEL_LOG_FILE"; fi ;;

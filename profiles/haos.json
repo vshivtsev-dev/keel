@@ -10,7 +10,15 @@
     // Если API недоступен, берётся fallback_version.
     "github_repo": "home-assistant/operating-system",
     "version": "latest",
-    "fallback_version": "14.2",
+
+    // Имя файла берётся из ответа GitHub по этому образцу, а не собирается
+    // из шаблона: наверху могут переименовать файл или не выложить его для
+    // очередной версии — так уже было с 18.3, и keel уткнулся в 404.
+    "asset_pattern": "^haos_ova-.*[.]qcow2[.]xz$",
+
+    // Запасные пути, если API недоступен: сначала шаблон с найденной
+    // версией, потом он же с fallback_version.
+    "fallback_version": "18.2",
     "url_template": "https://github.com/home-assistant/operating-system/releases/download/${version}/haos_ova-${version}.qcow2.xz",
     "compressed": "xz"
   },
