@@ -15,6 +15,11 @@ services:
       target: dist
       args:
         VERSION: ${KEEL_VERSION:-dev}
+        # Адрес, по которому эта раздача будет доступна снаружи. Он
+        # вкомпилируется в бинарник (keel update) и подставится в
+        # install.sh. В Dokploy задаётся переменной окружения вместе с
+        # доменом, который выдаёт Traefik.
+        KEEL_DIST_URL: ${KEEL_DIST_URL:-http://localhost:8080}
     image: keel-dist:${KEEL_VERSION:-dev}
     restart: unless-stopped
     expose:

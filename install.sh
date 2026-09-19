@@ -2,26 +2,27 @@
 #
 # keel :: установка на хост Proxmox VE.
 #
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/vshivtsev-dev/keel/main/install.sh)"
+#   bash -c "$(curl -fsSL https://ТВОЙ-ДОМЕН/install.sh)"
 #
-# Кладёт код в /root/keel/app и делает команду keel доступной. Всё, с чем
-# работаешь ты — манифест, пароли, логи, копии, — лежит рядом, в /root/keel.
-# Систему при этом не настраивает — это делает уже сам keel, и только
-# после того, как ты посмотришь план.
+# Ставит один статический бинарник и раскладывает каталог /root/keel:
+# манифест, секреты, копии файлов, логи, планы. Систему при этом не
+# настраивает — это делает уже сам keel, и только после того, как ты
+# посмотришь план.
 #
-# git не нужен: на свежем Proxmox его нет, а инструмент восстановления,
-# который перед работой просит что-то доустановить, — плохой инструмент
-# восстановления. Обновление — повторный запуск этой же команды.
+# Зависимостей у keel нет никаких: ни perl, ни whiptail, ни даже
+# совместимой libc. Инструмент восстановления, который перед работой
+# просит что-то доустановить, — плохой инструмент восстановления.
+#
+# Скачанный бинарник сверяется с контрольной суммой. От тебя для этого
+# ничего не требуется: сумма едет вместе с ним. Раньше по этой ссылке
+# приезжал читаемый скрипт, который можно было открыть и посмотреть;
+# теперь это непрозрачный файл, и сверка — единственное, что остаётся.
 
 set -Eeuo pipefail
 
-KEEL_OWNER="${KEEL_OWNER:-vshivtsev-dev}"
-KEEL_NAME="${KEEL_NAME:-keel}"
-KEEL_BRANCH="${KEEL_BRANCH:-main}"
+KEEL_DIST="${KEEL_DIST:-https://keel.example.invalid}"
 KEEL_HOME="${KEEL_HOME:-/root/keel}"
-KEEL_PREFIX="${KEEL_PREFIX:-${KEEL_HOME}/app}"
 KEEL_BIN="${KEEL_BIN:-/usr/local/bin/keel}"
-KEEL_TARBALL="${KEEL_TARBALL:-https://codeload.github.com/${KEEL_OWNER}/${KEEL_NAME}/tar.gz/refs/heads/${KEEL_BRANCH}}"
 
 if [[ -t 1 ]]; then
   C_RESET=$'\033[0m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'
@@ -38,34 +39,51 @@ die()  { printf '%s✗%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 
 if [[ -f /etc/pve/.version ]] || command -v pveversion >/dev/null 2>&1; then
   ok "Proxmox VE обнаружен: $(pveversion 2>/dev/null | head -n1)"
+elif [[ "${KEEL_ASSUME_YES:-}" == "1" ]]; then
+  warn "Это не похоже на хост Proxmox VE — ставлю, потому что задан KEEL_ASSUME_YES=1."
 else
   warn "Это не похоже на хост Proxmox VE. keel рассчитан на него."
+  # Спрашиваем у терминала напрямую: установщик запускают через
+  # «bash -c "$(curl …)"», и на обычном stdin в этот момент висит сам
+  # скрипт. Терминала нет вовсе — значит спросить некого, и ставить
+  # молча на непонятную машину не стоит.
+  if [[ ! -r /dev/tty ]]; then
+    die "Спросить некого: терминала нет. Если уверен — KEEL_ASSUME_YES=1 перед командой."
+  fi
   read -r -p "Продолжить всё равно? [y/N] " reply </dev/tty || die "Отменено."
   [[ "$reply" == [yY] ]] || die "Отменено."
 fi
 
-perl -MJSON::PP -e 'exit 0' >/dev/null 2>&1 \
-  || die "Нет perl с JSON::PP — читать манифест нечем. Это странно для Proxmox."
-command -v tar >/dev/null 2>&1 || die "Нет tar — распаковать репозиторий нечем."
+case "$(uname -m)" in
+  x86_64|amd64) ARCH=amd64 ;;
+  aarch64|arm64) ARCH=arm64 ;;
+  *) die "Неизвестная архитектура $(uname -m) — сборки под неё нет." ;;
+esac
 
-# whiptail нужен только для меню: без него keel работает текстом
-command -v whiptail >/dev/null 2>&1 \
-  || warn "Нет whiptail — меню будет текстовым (поставить: apt install whiptail)."
+command -v sha256sum >/dev/null 2>&1 \
+  || die "Нет sha256sum — сверить скачанное нечем. Это странно для Debian."
 
-[[ -e "$KEEL_PREFIX" && ! -d "$KEEL_PREFIX" ]] \
-  && die "${KEEL_PREFIX} существует и это не каталог. Убери его или задай KEEL_PREFIX."
+fetch() {
+  local url=$1 dest=$2
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 3 --retry-delay 2 -o "$dest" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --tries=3 -O "$dest" "$url"
+  else
+    die "Нет ни curl, ни wget — скачать нечем."
+  fi
+}
 
 # --- Переезд со старой раскладки ---------------------------------------------
 #
-# Версии до 0.2.0 раскладывали keel по трём местам: код в /opt/keel, данные в
-# /var/lib/keel, логи в /var/log/keel. Помнить три пути неудобно, поэтому всё
-# переезжает в один каталог. Данные переносятся, код — нет: удалить старый
-# каталог с кодом решает человек.
+# Версии до 0.2.0 раскладывали keel по трём местам: код в /opt/keel, данные
+# в /var/lib/keel, логи в /var/log/keel. Помнить три пути неудобно, поэтому
+# всё переезжает в один каталог. Данные переносятся, код — нет: удалить
+# старый каталог с кодом решает человек.
 
 migrate_dir() {
   local from=$1 to=$2 what=$3
   [[ -d "$from" ]] || return 0
-  # Пустой каталог переносить незачем
   [[ -n "$(ls -A "$from" 2>/dev/null)" ]] || { rmdir "$from" 2>/dev/null || true; return 0; }
   mkdir -p "$to"
   local item
@@ -98,34 +116,33 @@ fi
 
 # --- Установка ---------------------------------------------------------------
 
-tmp=$(mktemp)
+NAME="keel-linux-${ARCH}"
+tmp=$(mktemp -d)
 # shellcheck disable=SC2064  # путь подставляется сейчас, это и нужно
-trap "rm -f '$tmp'" EXIT
+trap "rm -rf '$tmp'" EXIT
 
-printf 'Скачиваю %s\n' "$KEEL_TARBALL"
-if command -v curl >/dev/null 2>&1; then
-  curl -fsSL -o "$tmp" "$KEEL_TARBALL" || die "Не удалось скачать ${KEEL_TARBALL}"
-elif command -v wget >/dev/null 2>&1; then
-  wget -qO "$tmp" "$KEEL_TARBALL" || die "Не удалось скачать ${KEEL_TARBALL}"
-else
-  die "Нет ни curl, ни wget — скачать репозиторий нечем."
+printf 'Скачиваю %s/%s\n' "$KEEL_DIST" "$NAME"
+fetch "${KEEL_DIST}/${NAME}"       "${tmp}/${NAME}"     || die "Не удалось скачать ${NAME}"
+fetch "${KEEL_DIST}/checksums.txt" "${tmp}/checksums.txt" || die "Не удалось скачать контрольные суммы"
+
+# Сверяем молча и по-настоящему: берём из общего файла строку про наш файл
+# и проверяем её штатным sha256sum, а не сравнением глазами.
+want=$(awk -v n="$NAME" '$2 == n { print $1 }' "${tmp}/checksums.txt" | head -n1)
+[[ -n "$want" ]] || die "В checksums.txt нет строки про ${NAME} — раздача собрана неправильно."
+
+got=$(sha256sum "${tmp}/${NAME}" | awk '{print $1}')
+if [[ "$got" != "$want" ]]; then
+  printf '  ожидалась: %s\n  получена:  %s\n' "$want" "$got" >&2
+  die "Контрольная сумма не сошлась. Не ставлю: скачалось не то, что собиралось."
 fi
+ok "Контрольная сумма сошлась"
 
-mkdir -p "$KEEL_HOME" "$KEEL_PREFIX"
-# Распаковка затирает app/ целиком — и это нормально: там только код.
-# Твой host.json лежит уровнем выше, до него она не дотягивается.
-tar -xzf "$tmp" -C "$KEEL_PREFIX" --strip-components=1 \
-  || die "Не удалось распаковать архив в ${KEEL_PREFIX}"
-ok "keel распакован в ${KEEL_PREFIX}"
-
-chmod +x "${KEEL_PREFIX}/bin/keel" "${KEEL_PREFIX}/tests/"*.sh 2>/dev/null || true
-ln -sfn "${KEEL_PREFIX}/bin/keel" "$KEEL_BIN"
+install -m 0755 "${tmp}/${NAME}" "$KEEL_BIN"
 ok "Команда keel доступна: ${KEEL_BIN}"
 
-if [[ ! -f "${KEEL_HOME}/host.json" ]]; then
-  cp "${KEEL_PREFIX}/manifest/host.example.json" "${KEEL_HOME}/host.json"
-  ok "Создан манифест ${KEEL_HOME}/host.json — поправь его под себя"
-fi
+# Каталог и манифест раскладывает сам keel: он знает свою раскладку лучше,
+# чем установщик, и примером манифеста тоже владеет он.
+"$KEEL_BIN" init
 
 if [[ -d /opt/keel ]]; then
   warn "Старый каталог кода /opt/keel больше не используется. Убрать: rm -rf /opt/keel"
@@ -133,17 +150,13 @@ fi
 
 cat <<EOF
 
-Готово. Дальше по порядку:
+Готово: $("$KEEL_BIN" version)
+
+Дальше по порядку:
 
   keel doctor     посмотреть, что за хост и что с видеокартой
   keel plan       увидеть, что изменится — ничего не выполняется
-  keel            меню
+  keel            открыть экран
 
-Всё твоё — в одном каталоге ${KEEL_HOME}:
-
-  host.json     манифест: единственный файл, который ты правишь
-  secrets/      пароли гостей и токены
-  backups/      копии файлов до того, как keel их правил
-  logs/         логи запусков
-  app/          код keel — перезаписывается при обновлении
+Обновить потом: keel update
 EOF

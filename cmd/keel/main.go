@@ -37,6 +37,8 @@ const usage = `keel — сборка и восстановление хоста 
   gpu revert  откатить проброс видеокарты
   gpu status  что записано о пробросе
   validate    проверить манифест на ошибки
+  init        разложить каталог keel и создать манифест
+  update      обновить сам keel, сверив контрольную сумму
   version     версия
   help        эта справка
 
@@ -147,6 +149,10 @@ func run(argv []string) error {
 		return nil
 	case "doctor":
 		return cli.Doctor(ctx, os.Stdout, p, exec.System{}, opts.JSON)
+	case "init":
+		return cli.Init(os.Stdout, p)
+	case "update":
+		return cli.Update(ctx, os.Stdout, version)
 	case "validate":
 		path := opts.Manifest
 		if path == "" {

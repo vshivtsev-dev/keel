@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -117,5 +118,66 @@ func TestUnknownKeyRejected(t *testing.T) {
 	_, err := Parse([]byte(`{"host":{"repost":"no-subscription"}}`))
 	if err == nil {
 		t.Fatal("опечатка в ключе принята молча")
+	}
+}
+
+// Пример манифеста лежит в двух местах: manifest/ читает bash-версия, а
+// internal/manifest/ вкомпилирован в бинарник. Две копии одного файла
+// расходятся всегда, вопрос только когда.
+func TestEmbeddedExampleMatchesRepoCopy(t *testing.T) {
+	onDisk, err := os.ReadFile(filepath.Join(repoRoot(t), "manifest", "host.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(Example()) != string(onDisk) {
+		t.Error("встроенный пример манифеста разошёлся с manifest/host.example.json")
+	}
+}
+
+// Единственный файл, который человек правит руками, перезаписывать нельзя.
+func TestInitNeverOverwritesExistingManifest(t *testing.T) {
+	home := t.TempDir()
+	mine := []byte(`{"host":{"repos":"enterprise"}}`)
+	if err := os.WriteFile(filepath.Join(home, "host.json"), mine, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := Init(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Error("Init сообщил, что создал манифест поверх существующего")
+	}
+	got, _ := os.ReadFile(filepath.Join(home, "host.json"))
+	if string(got) != string(mine) {
+		t.Fatalf("манифест перезаписан: %s", got)
+	}
+}
+
+func TestInitCreatesLayout(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "keel")
+
+	created, err := Init(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Error("манифест не создан на пустом месте")
+	}
+
+	if _, err := Load(filepath.Join(home, "host.json")); err != nil {
+		t.Errorf("созданный манифест не читается: %v", err)
+	}
+	for _, dir := range []string{"secrets", "logs", "backups", "plans"} {
+		st, err := os.Stat(filepath.Join(home, dir))
+		if err != nil {
+			t.Errorf("нет каталога %s: %v", dir, err)
+			continue
+		}
+		// В secrets/ лежат пароли — туда посторонним не надо.
+		if dir == "secrets" && st.Mode().Perm() != 0o700 {
+			t.Errorf("права на secrets/ %v, ожидалось 0700", st.Mode().Perm())
+		}
 	}
 }
