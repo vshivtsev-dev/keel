@@ -104,13 +104,45 @@ type ErrGuarded struct {
 
 func (e *ErrGuarded) Error() string { return e.Why }
 
-// Do выполняет один шаг плана.
-func (r *Runner) Do(ctx context.Context, step plan.Step) error {
+// Prepare проводит шаг через всё, что положено до выполнения: условия,
+// подтверждение, подстановку секретов, запись в лог, — и возвращает
+// готовую команду, не запуская её.
+//
+// Нужно это ровно для одного случая: интерактивного шага, которому экран
+// отдаёт терминал целиком. apt иногда спрашивает, что делать с изменённым
+// конфигом, и в невидимом окне такой вопрос повисает молча — выглядит это
+// как зависание ровно посреди правки конфигурации.
+//
+// Пустая команда в ответе означает, что шаг выполнять не надо: его
+// пропустили или не пустило условие.
+func (r *Runner) Prepare(ctx context.Context, step plan.Step) (*exec.Cmd, error) {
+	if step.Action != plan.ActionExec {
+		return nil, fmt.Errorf("шаг %s: терминал отдаётся только командам", step.ID)
+	}
+	proceed, err := r.before(ctx, step)
+	if err != nil || !proceed {
+		return nil, err
+	}
+	resolved, err := r.resolveSecrets(step)
+	if err != nil {
+		return nil, err
+	}
+	r.announce(resolved, "")
+	r.recorded = append(r.recorded, Render(resolved.Cmd))
+	if r.Sandboxed || r.DryRun {
+		r.logf("В ПЕСОЧНИЦЕ, не выполняю: %s", Render(resolved.Cmd))
+		return nil, nil
+	}
+	return exec.CommandContext(ctx, resolved.Cmd[0], resolved.Cmd[1:]...), nil
+}
+
+// before — общая часть: показать, спросить, проверить условия.
+// Ложь без ошибки значит «шаг выполнять не надо».
+func (r *Runner) before(ctx context.Context, step plan.Step) (bool, error) {
 	body, err := r.body(step)
 	if err != nil {
-		return err
+		return false, err
 	}
-
 	r.logf("ШАГ:    %s", step.Summary)
 	if body != "" {
 		r.logf("ЧТО:    %s", body)
@@ -118,30 +150,47 @@ func (r *Runner) Do(ctx context.Context, step plan.Step) error {
 
 	if r.DryRun {
 		r.announce(step, body)
-		return nil
+		return false, nil
 	}
-
 	if r.Confirm != nil {
 		switch r.Confirm(step, r.mask(body)) {
 		case Apply:
 		case Skip:
 			r.logf("ПРОПУЩЕНО: %s", step.Summary)
-			return nil
+			return false, nil
 		default:
 			r.logf("ПРЕРВАНО на шаге: %s", step.Summary)
-			return ErrAborted
+			return false, ErrAborted
 		}
 	}
-
 	for _, g := range step.Guards {
 		check, ok := r.Guards[g.Kind]
 		if !ok {
-			return &ErrGuarded{Step: step, Why: "некому проверить условие «" + string(g.Kind) + "»"}
+			return false, &ErrGuarded{Step: step, Why: "некому проверить условие «" + string(g.Kind) + "»"}
 		}
 		if why := check(ctx, g.Arg); why != "" {
 			r.logf("НЕ НАЧАТО: %s — %s", step.Summary, why)
-			return &ErrGuarded{Step: step, Why: why}
+			return false, &ErrGuarded{Step: step, Why: why}
 		}
+	}
+	return true, nil
+}
+
+// Finish дописывает в лог, чем кончился шаг, которому отдавали терминал.
+func (r *Runner) Finish(step plan.Step, err error) error {
+	if err != nil {
+		r.logf("ОШИБКА: %s — %v", Render(step.Cmd), err)
+		return fmt.Errorf("%s: %w", Render(step.Cmd), err)
+	}
+	r.logf("ГОТОВО: %s", step.Summary)
+	return nil
+}
+
+// Do выполняет один шаг плана.
+func (r *Runner) Do(ctx context.Context, step plan.Step) error {
+	proceed, err := r.before(ctx, step)
+	if err != nil || !proceed {
+		return err
 	}
 
 	step, err = r.resolveSecrets(step)

@@ -17,6 +17,7 @@ import (
 	"github.com/vshivtsev-dev/keel/internal/cli"
 	"github.com/vshivtsev-dev/keel/internal/exec"
 	"github.com/vshivtsev-dev/keel/internal/paths"
+	"github.com/vshivtsev-dev/keel/internal/ui"
 )
 
 // version подставляется при сборке: -ldflags "-X main.version=0.3.0".
@@ -28,6 +29,7 @@ const usage = `keel — сборка и восстановление хоста 
   keel [флаги] команда [аргумент]
 
 Команды:
+  (без команды) открыть экран keel
   doctor      отчёт о состоянии хоста — только чтение
   plan        собрать план изменений и сохранить его файлом
   apply [ФАЙЛ] применить план (без аргумента — последний собранный)
@@ -123,9 +125,14 @@ func run(argv []string) error {
 		}
 	}
 
-	if showHelp || cmd == "" || cmd == "help" {
+	if showHelp || cmd == "help" {
 		fmt.Print(usage)
 		return nil
+	}
+	// Без команды открывается экран: это и есть главный способ работы с
+	// keel, а команды — для скриптов и для консоли без терминала.
+	if cmd == "" {
+		cmd = "menu"
 	}
 
 	// Ctrl-C должен останавливать долгое чтение и применение, а не висеть.
@@ -156,6 +163,8 @@ func run(argv []string) error {
 	defer app.Close()
 
 	switch cmd {
+	case "menu":
+		return ui.Run(ctx, app)
 	case "plan":
 		return cli.Plan(ctx, app)
 	case "apply":
@@ -171,7 +180,7 @@ func run(argv []string) error {
 		default:
 			return fmt.Errorf("keel gpu revert — откатить проброс; keel gpu status — что записано")
 		}
-	case "menu", "guests", "password", "token", "external", "logs", "backup":
+	case "guests", "password", "token", "external", "logs", "backup":
 		return fmt.Errorf("команда %q ещё не перенесена на Go — пока пользуйся bash-версией: %s/bin/keel %s",
 			cmd, bashHome(), cmd)
 	default:

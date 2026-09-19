@@ -20,7 +20,7 @@ func TestKnownWords(t *testing.T) {
 	cases := []struct{ got, want string }{
 		{Step(1), "1 шаг"}, {Step(3), "3 шага"}, {Step(5), "5 шагов"},
 		{Package(1), "1 пакет"}, {Guest(2), "2 гостя"}, {Hour(21), "21 час"},
-		{Path(2), "2 пути"}, {Change(1), "1 изменение"}, {Area(5), "5 областей"},
+		{Path(2), "2 пути"}, {Change(1), "1 изменение"}, {InAreas(1), "1 области"}, {InAreas(5), "5 областях"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {

@@ -80,7 +80,7 @@ func Apply(ctx context.Context, a *App, planPath string) error {
 	report(a, s, rep)
 
 	if a.Opts.Mode != ModeDry {
-		if err := a.recordGPUState(m, f, rep, runner.Stamp); err != nil {
+		if err := a.RecordGPUState(m, f, rep, runner.Stamp); err != nil {
 			s.warn("запись о пробросе", err.Error())
 		}
 	}

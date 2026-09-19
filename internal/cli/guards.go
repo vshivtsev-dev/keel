@@ -11,6 +11,10 @@ import (
 	"github.com/vshivtsev-dev/keel/internal/provider/host"
 )
 
+// Guards — как keel проверяет условия шагов. Открыты наружу: тем же
+// набором пользуется экран.
+func Guards(f *facts.Facts) map[plan.GuardKind]exec.GuardFunc { return guards(f) }
+
 // guards — как keel проверяет условия шагов. Проверка живёт здесь, а не в
 // провайдере: провайдер описывает, что должно быть, и в сеть не ходит.
 func guards(f *facts.Facts) map[plan.GuardKind]exec.GuardFunc {

@@ -57,13 +57,13 @@ func (a *App) confirmBlackout(m *manifest.Manifest, f *facts.Facts) error {
 	return nil
 }
 
-// recordGPUState записывает, что именно keel изменил, отдавая видеокарту.
+// RecordGPUState записывает, что именно keel изменил, отдавая видеокарту.
 //
 // Это единственное место, где keel пишет файл мимо плана, и так задумано:
 // запись должна отражать то, что случилось на самом деле, а не то, что
 // планировалось. Без неё откат невозможен, а откат здесь — вопрос того,
 // увидит ли человек снова картинку на мониторе.
-func (a *App) recordGPUState(m *manifest.Manifest, f *facts.Facts, rep engine.ApplyReport, stamp string) error {
+func (a *App) RecordGPUState(m *manifest.Manifest, f *facts.Facts, rep engine.ApplyReport, stamp string) error {
 	var changed, created []string
 	for _, s := range rep.Done {
 		if s.Provider != "host/gpu" || s.Action != plan.ActionWrite {

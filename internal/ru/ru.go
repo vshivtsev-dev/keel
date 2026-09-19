@@ -24,7 +24,6 @@ func Plural(n int, one, few, many string) string {
 
 // Известные слова — чтобы одни и те же вещи склонялись одинаково во всём
 // выводе, а не по-разному в каждом месте.
-func Steps(n int) int      { return n }
 func Cores(n int) string   { return Plural(n, "ядро", "ядра", "ядер") }
 func Step(n int) string    { return Plural(n, "шаг", "шага", "шагов") }
 func Package(n int) string { return Plural(n, "пакет", "пакета", "пакетов") }
@@ -35,4 +34,9 @@ func Path(n int) string    { return Plural(n, "путь", "пути", "путе�
 func Change(n int) string {
 	return Plural(n, "изменение", "изменения", "изменений")
 }
-func Area(n int) string { return Plural(n, "область", "области", "областей") }
+
+// InAreas — предложный падеж: «в 1 области», «в 2 областях». Отдельно от
+// именительного нарочно: «2 шага в 2 области» читается как ошибка.
+func InAreas(n int) string {
+	return Plural(n, "области", "областях", "областях")
+}
