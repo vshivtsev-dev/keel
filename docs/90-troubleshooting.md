@@ -13,15 +13,6 @@ ls /root/keel/backups/       # копии файлов, снятые до каж
 
 ---
 
-## «Не найден Perl с модулем JSON::PP»
-
-Читать манифест нечем. На нормальном Proxmox такого быть не должно — Perl там
-есть всегда, сам PVE на нём написан.
-
-```bash
-apt install --reinstall perl-modules-5.36   # номер версии подставь свой
-```
-
 ## Комментарии в манифесте ломают разбор
 
 `keel doctor` покажет, в каком режиме работает парсер. Если написано, что
@@ -37,8 +28,8 @@ keel validate
 Это ровно то, что чинит модуль репозиториев:
 
 ```bash
-keel plan --only host/10-repos
-keel apply --only host/10-repos
+keel plan --only host/repos
+keel apply --only host/repos
 ```
 
 ## «Ни у одного хранилища не разрешены сниппеты»
@@ -52,7 +43,7 @@ keel apply --only host/10-repos
 ]
 ```
 
-и примени `host/30-storage`.
+и примени `host/storage`.
 
 ## Гость не создался: «storage does not exist»
 
@@ -145,7 +136,7 @@ curl -4 -so /dev/null -w 'IPv4: %{speed_download} B/s\n' \
 ```
 
 Десятки килобайт в секунду — обновление лучше отложить до починки сети.
-Мегабайты — повтори `keel apply --only host/20-updates`.
+Мегабайты — повтори `keel apply --only host/updates`.
 
 Если скорость честно низкая, но обновиться надо прямо сейчас и ты готов
 приглядывать за памятью, порог снимается в манифесте:
@@ -229,7 +220,7 @@ pvesh delete /cluster/backup/<id>                # удалить нужное
 
 ```bash
 rm /root/keel/images/имя-файла
-keel apply --only guests/50-guests
+keel apply --only guests
 ```
 
 ## keel говорит «Это не хост Proxmox VE»

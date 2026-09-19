@@ -65,7 +65,7 @@
 ## Шаг 3. Применить
 
 ```bash
-keel apply --only guests/50-guests
+keel apply --only guests
 ```
 
 keel спросит токен и сохранит его в `/root/keel/secrets/cloudflared.txt` с
@@ -133,7 +133,7 @@ pct exec 102 -- journalctl -u cloudflared -n 50     # если что-то не 
 
 ```bash
 rm /root/keel/secrets/cloudflared.txt
-keel apply --only guests/50-guests
+keel apply --only guests
 ```
 
 **Служба не запускается, `cloudflared: command not found`.** Не скачался

@@ -3,24 +3,18 @@ package manifest
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	_, self, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("не удалось определить путь к тесту")
-	}
-	return filepath.Join(filepath.Dir(self), "..", "..")
-}
-
-// Главная проверка порта: настоящий пример манифеста, который читал bash,
-// должен читаться новым разбором без потерь. Если этот тест падает —
-// существующие установки сломаются при обновлении.
+// Пример манифеста — это документация, которую исполняет keel: человек
+// копирует его и правит. Значит он обязан читаться без единой ошибки, и
+// каждое поле в нём должно доезжать до кода.
 func TestLoadExampleManifest(t *testing.T) {
-	m, err := Load(filepath.Join(repoRoot(t), "manifest", "host.example.json"))
+	path := filepath.Join(t.TempDir(), "host.json")
+	if err := os.WriteFile(path, Example(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Load(path)
 	if err != nil {
 		t.Fatalf("пример манифеста не читается: %v", err)
 	}
@@ -118,19 +112,6 @@ func TestUnknownKeyRejected(t *testing.T) {
 	_, err := Parse([]byte(`{"host":{"repost":"no-subscription"}}`))
 	if err == nil {
 		t.Fatal("опечатка в ключе принята молча")
-	}
-}
-
-// Пример манифеста лежит в двух местах: manifest/ читает bash-версия, а
-// internal/manifest/ вкомпилирован в бинарник. Две копии одного файла
-// расходятся всегда, вопрос только когда.
-func TestEmbeddedExampleMatchesRepoCopy(t *testing.T) {
-	onDisk, err := os.ReadFile(filepath.Join(repoRoot(t), "manifest", "host.example.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(Example()) != string(onDisk) {
-		t.Error("встроенный пример манифеста разошёлся с manifest/host.example.json")
 	}
 }
 

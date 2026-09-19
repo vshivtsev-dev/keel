@@ -1,56 +1,6 @@
 package profile
 
-import (
-	"os"
-	"path/filepath"
-	"runtime"
-	"testing"
-)
-
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	_, self, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(self), "..", "..")
-}
-
-// Профили лежат в двух местах: profiles/ читает bash-версия, а
-// internal/profile/ вкомпилирован в бинарник — go:embed не умеет брать
-// файлы вне своего каталога.
-//
-// Две копии одного файла расходятся всегда, вопрос только когда. Пока
-// обе версии живут рядом, за этим следит тест; на этапе 8, когда bash
-// уйдёт, копия останется одна.
-func TestEmbeddedProfilesMatchRepoCopies(t *testing.T) {
-	root := repoRoot(t)
-	names := Names()
-	if len(names) == 0 {
-		t.Fatal("во встроенных профилях пусто")
-	}
-
-	for _, name := range names {
-		embedded, err := builtin.ReadFile(name + ".json")
-		if err != nil {
-			t.Fatal(err)
-		}
-		onDisk, err := os.ReadFile(filepath.Join(root, "profiles", name+".json"))
-		if err != nil {
-			t.Errorf("профиля %s нет в profiles/: %v", name, err)
-			continue
-		}
-		if string(embedded) != string(onDisk) {
-			t.Errorf("профиль %s разошёлся: встроенная копия не совпадает с profiles/%s.json", name, name)
-		}
-	}
-
-	// И наоборот: профиль, добавленный в profiles/, должен попасть внутрь.
-	got, err := filepath.Glob(filepath.Join(root, "profiles", "*.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != len(names) {
-		t.Errorf("в profiles/ %d файлов, встроено %d — копии разошлись", len(got), len(names))
-	}
-}
+import "testing"
 
 // Каждый профиль обязан читаться и объявлять понятный вид гостя: из вида
 // следует, чем гость создаётся, и второго источника правды об этом нет.

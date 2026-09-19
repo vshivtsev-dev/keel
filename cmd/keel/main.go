@@ -36,6 +36,12 @@ const usage = `keel — сборка и восстановление хоста 
   verify      сверить хост с манифестом
   gpu revert  откатить проброс видеокарты
   gpu status  что записано о пробросе
+  guests      гости из манифеста и их состояние
+  password ID пароль, сохранённый для гостя
+  token [ИМЯ] сохранённый токен (по умолчанию cloudflared)
+  backup      снять копию конфигурации хоста прямо сейчас
+  external    внешние инструменты (community-scripts)
+  logs        показать предыдущий лог
   validate    проверить манифест на ошибки
   init        разложить каталог keel и создать манифест
   update      обновить сам keel, сверив контрольную сумму
@@ -186,9 +192,21 @@ func run(argv []string) error {
 		default:
 			return fmt.Errorf("keel gpu revert — откатить проброс; keel gpu status — что записано")
 		}
-	case "guests", "password", "token", "external", "logs", "backup":
-		return fmt.Errorf("команда %q ещё не перенесена на Go — пока пользуйся bash-версией: %s/bin/keel %s",
-			cmd, bashHome(), cmd)
+	case "guests":
+		return cli.Guests(ctx, app)
+	case "password":
+		return cli.Password(app, planArg)
+	case "token":
+		return cli.Token(app, planArg)
+	case "logs":
+		return cli.Logs(app)
+	case "external":
+		return cli.External(ctx, app, planArg)
+	case "backup":
+		// Снять копию конфигурации прямо сейчас — это тот же план, только
+		// суженный до одного провайдера.
+		app.Opts.Only = "host/config-backup"
+		return cli.Apply(ctx, app, "")
 	default:
 		return fmt.Errorf("неизвестная команда: %s (см. keel help)", cmd)
 	}
@@ -200,11 +218,4 @@ func next(argv []string, i *int, flag string) (string, error) {
 		return "", errors.New("у " + flag + " не указано значение")
 	}
 	return argv[*i], nil
-}
-
-func bashHome() string {
-	if v := os.Getenv("KEEL_HOME"); v != "" {
-		return v + "/app"
-	}
-	return "/root/keel/app"
 }

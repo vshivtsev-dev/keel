@@ -216,7 +216,7 @@ qm config 201 | grep hostpci
 ```
 
 `vfio-pci` — устройство отдано. Остался `amdgpu` — значит что-то из
-изменений не доехало; смотри `keel verify --only host/60-gpu-passthrough`.
+изменений не доехало; смотри `keel verify --only host/gpu`.
 
 ## Про 780M честно
 

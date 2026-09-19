@@ -32,25 +32,28 @@ Proxmox, которая показывает результат сама.
 ```bash
 git clone https://github.com/vshivtsev-dev/keel.git
 cd keel
-./tests/run.sh
+go test ./...
 ```
 
-Ожидается: `провалено: 0`. Число пройденных растёт от версии к версии — важно,
-что провалов нет.
+Ожидается: везде `ok`. Проверяется всё, что можно проверить без Proxmox:
+разбор манифеста, собранные команды провайдеров (дословно), ворота изменений,
+отрисовка экрана в обеих раскладках.
 
-Если есть docker — то же самое в Debian 13, на котором стоит Proxmox VE 9:
+Заодно стоит посмотреть, какие команды keel вообще собирается отдать хосту —
+глазами, до всякого применения:
 
 ```bash
-./tests/docker.sh
+go run ./cmd/keel plan --commands
 ```
 
-Здесь важен не столько итог, сколько блок «Окружение» в начале: он говорит,
-верны ли допущения, на которых построен keel (`perl` с `JSON::PP`, режим
-`relaxed`, `whiptail`). **Это первое, чего я не проверял** — сборка образа
-в песочнице была недоступна.
+И на экран, не запуская его:
 
-- [ ] тесты прошли локально
-- [ ] тесты прошли в docker (если он есть)
+```bash
+KEEL_DUMP=1 go test ./internal/ui -run TestDump -v
+```
+
+- [ ] тесты прошли
+- [ ] список команд выглядит осмысленно
 
 ---
 
@@ -117,20 +120,17 @@ keel doctor
 | Строка | Что должно быть |
 |---|---|
 | Proxmox VE | версия определилась, не «не обнаружен» |
-| Парсер манифеста | `JSON::PP, режим relaxed` |
-| whiptail | `есть, меню доступно` |
-| Формат репозиториев | `deb822` для PVE 9, `list` для PVE 8 |
-| Загрузчик | `systemd-boot` или `grub`, не «неизвестно» |
+| репозитории apt | `deb822` для PVE 9, `list` для PVE 8 |
+| загрузчик | `systemd-boot` или `grub`, не «неизвестно» |
 | Хранилища | твои реальные имена (`local`, `local-lvm` или `local-zfs`) |
-| Графика | Radeon 780M, IOMMU-группа, `/dev/dri` |
+| Видео | Radeon 780M и узлы `/dev/dri` |
 
 **Это второе, чего я не проверял** — весь раздел про железо писался
 вслепую.
 
 - [ ] Proxmox опознан
-- [ ] парсер манифеста в режиме relaxed
-- [ ] whiptail на месте
-- [ ] раздел «Графика» показывает 780M и `/dev/dri`
+- [ ] формат репозиториев определился
+- [ ] раздел «Видео» показывает 780M и `/dev/dri`
 
 **Сохрани вывод целиком** — он понадобится мне и тебе:
 
@@ -200,7 +200,7 @@ keel apply --dry-run > /root/dry-run.txt
 меняет — и сразу даёт точку возврата для всех следующих шагов.
 
 ```bash
-keel apply --only host/90-config-backup
+keel apply --only host/config-backup
 ```
 
 keel покажет команду и спросит подтверждение. Отвечай «Применить».
@@ -222,7 +222,7 @@ tar -xzOf /var/lib/vz/dump/keel-config/keel-host-*.tar.gz ./host-report.txt | he
 Проверь идемпотентность — повторный запуск не должен делать новый архив:
 
 ```bash
-keel apply --only host/90-config-backup    # должно сказать «уже в нужном состоянии»
+keel apply --only host/config-backup    # должно сказать «уже в нужном состоянии»
 ```
 
 - [ ] архив создан и содержит `etc/pve`
@@ -237,7 +237,7 @@ keel apply --only host/90-config-backup    # должно сказать «уж�
 Первое изменение, которое реально правит систему. Откат тривиален.
 
 ```bash
-keel apply --only host/10-repos
+keel apply --only host/repos
 ```
 
 Перед записью файла keel покажет diff. Посмотри на него: пути, кодовое имя
@@ -268,7 +268,7 @@ cp /root/keel/backups/<дата>/etc/apt/sources.list.d/* /etc/apt/sources.list.
 - [ ] `apt-get update` проходит без ошибки 401 и без `Malformed stanza`
 - [ ] enterprise-репозиторий помечен выключенным, но не удалён
 - [ ] в выключенном `.sources` нет пустых строк
-- [ ] `keel verify --only host/10-repos` подтверждает результат
+- [ ] `keel verify --only host/repos` подтверждает результат
 
 ---
 
@@ -278,7 +278,7 @@ cp /root/keel/backups/<дата>/etc/apt/sources.list.d/* /etc/apt/sources.list.
 перезагружать не станет.
 
 ```bash
-keel apply --only host/20-updates
+keel apply --only host/updates
 ```
 
 Вывод `apt` идёт на экран в реальном времени — если экран молчит дольше
@@ -307,7 +307,7 @@ pveversion                 # версия могла подрасти
 ## Шаг 8. Хранилища
 
 ```bash
-keel apply --only host/30-storage
+keel apply --only host/storage
 ```
 
 Независимая проверка:
@@ -341,7 +341,7 @@ pvesm set local --content backup,import,iso,snippets,vztmpl
 /cluster/backup` без явного `--id`, рассчитывая на автогенерацию.
 
 ```bash
-keel apply --only host/40-backup-jobs
+keel apply --only host/backup
 ```
 
 Независимая проверка:
@@ -358,7 +358,7 @@ cat /etc/pve/jobs.cfg
 описан в `docs/90-troubleshooting.md`. Пришли мне текст ошибки.
 
 Проверь, что чужие задания не трогаются: заведи задание руками в
-веб-интерфейсе, запусти `keel apply --only host/40-backup-jobs` ещё раз —
+веб-интерфейсе, запусти `keel apply --only host/backup` ещё раз —
 оно должно остаться нетронутым.
 
 - [ ] задание создано и видно в веб-интерфейсе
@@ -405,7 +405,7 @@ keel plan --guest 201      # план только по контейнеру
 Самый большой шаг. Скачивание образа — около 400 МБ.
 
 ```bash
-keel apply --only guests/50-guests
+keel apply --only guests
 ```
 
 На что смотреть по дороге:
@@ -432,7 +432,7 @@ ls -lh /root/keel/images/           # образ осел в кэше
 Проверь главное правило — существующий гость не трогается:
 
 ```bash
-keel apply --only guests/50-guests     # «200 «haos» уже существует — пропускаю»
+keel apply --only guests     # «200 «haos» уже существует — пропускаю»
 ```
 
 И сообщение о расхождении: поменяй в манифесте `memory` у гостя 200 и
@@ -453,7 +453,7 @@ keel apply --only guests/50-guests     # «200 «haos» уже существу�
 внутри.
 
 ```bash
-keel apply --only guests/50-guests
+keel apply --only guests
 ```
 
 keel спросит пароль для пользователя рабочего стола. Оставишь пустым —
@@ -509,14 +509,14 @@ pct exec 201 -- vainfo                                 # профили аппа
 Сначала посмотри, что будет:
 
 ```bash
-keel apply --dry-run --only guests/50-guests
+keel apply --dry-run --only guests
 ```
 
 В выводе keel скажет, что токен будет запрошен при применении. Файла с токеном
 после сухого прогона появиться не должно.
 
 ```bash
-keel apply --only guests/50-guests
+keel apply --only guests
 ```
 
 keel спросит токен. Вставь — на экране будут звёздочки, в логе тоже.
@@ -560,7 +560,7 @@ keel
 ```
 
 Пройдись по пунктам: план, проверка, состояние, логи. Меню должно рисоваться
-рамками (whiptail), а не текстом.
+рамками, а не сплошным текстом.
 
 - [ ] `keel verify` зелёный по всем модулям
 - [ ] меню рисуется, все пункты открываются
@@ -590,14 +590,14 @@ cp /var/lib/vz/dump/keel-config/keel-host-*.tar.gz куда-нибудь-не-с
 Смотрим план — здесь видно каждую правку файла до единой:
 
 ```bash
-keel plan --only host/60-gpu-passthrough
+keel plan --only host/gpu
 ```
 
 Проверь в выводе: IOMMU включён, группа изолирована, загрузчик определён.
 Не сошлось хоть в одном — keel откажется, и правильно сделает.
 
 ```bash
-keel apply --only host/60-gpu-passthrough
+keel apply --only host/gpu
 ```
 
 keel попросит **набрать PCI-адрес видеокарты** — это подтверждение, что ты
