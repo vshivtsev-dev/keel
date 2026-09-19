@@ -15,7 +15,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/vshivtsev-dev/keel/internal/diff"
+	"github.com/aymanbagabas/go-udiff"
+
 	"github.com/vshivtsev-dev/keel/internal/exec"
 	"github.com/vshivtsev-dev/keel/internal/facts"
 	"github.com/vshivtsev-dev/keel/internal/manifest"
@@ -124,6 +125,9 @@ func (e *Engine) Collect(
 // fillDiffs дочитывает нынешнее содержимое правленых файлов и считает
 // разницу. Делает это движок, а не провайдер: провайдер знает, что должно
 // быть в файле, но в файловую систему не ходит вовсе.
+//
+// Разница — не украшение. Правка конфига самое опасное, что делает keel, и
+// человек должен увидеть её целиком до того, как она случится.
 func (e *Engine) fillDiffs(steps []plan.Step) []plan.Step {
 	out := make([]plan.Step, len(steps))
 	copy(out, steps)
@@ -136,8 +140,8 @@ func (e *Engine) fillDiffs(steps []plan.Step) []plan.Step {
 		if err != nil {
 			current, label = nil, out[i].Path+" (файла нет)"
 		}
-		out[i].Diff = diff.Unified(string(current), withNewline(string(out[i].Content)),
-			label, out[i].Path+" (станет)")
+		out[i].Diff = udiff.Unified(label, out[i].Path+" (станет)",
+			string(current), withNewline(string(out[i].Content)))
 	}
 	return out
 }

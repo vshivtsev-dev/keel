@@ -6,12 +6,18 @@ import (
 	"os"
 	"strings"
 	"unicode/utf8"
+
+	"golang.org/x/term"
 )
 
 // sheet печатает ровные колонки в обычный терминал. Цвет включается только
 // когда вывод и правда идёт на экран: в трубе и в файле управляющие
 // последовательности только мешают, а NO_COLOR — общепринятый способ
 // сказать «не надо», и его надо слушать.
+//
+// «Настоящий экран» определяется term.IsTerminal, а не тем, символьное ли
+// это устройство. Разница не теоретическая: /dev/null — тоже символьное
+// устройство, и самодельная проверка красила вывод в никуда.
 type sheet struct {
 	w     io.Writer
 	color bool
@@ -31,11 +37,7 @@ func colorEnabled(w io.Writer) bool {
 	if !ok {
 		return false
 	}
-	st, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return st.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(int(f.Fd()))
 }
 
 func (s *sheet) paint(code, text string) string {

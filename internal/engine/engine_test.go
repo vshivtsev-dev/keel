@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -269,5 +270,109 @@ func TestVerifyDoesNotCountUnmanagedAsDrift(t *testing.T) {
 	results := New(reg, nil, "тест").Verify(context.Background(), &manifest.Manifest{}, &facts.Facts{})
 	if results[0].Status != StatusOK {
 		t.Errorf("чужое хранилище принято за расхождение: %s", results[0].Status)
+	}
+}
+
+// --- разница по файлам --------------------------------------------------------
+//
+// Правка конфига — самое опасное, что делает keel, и человек должен
+// увидеть её целиком до того, как она случится. Эти проверки про то, что
+// он и правда увидит, а не про то, каким алгоритмом она посчитана.
+
+func diffFor(t *testing.T, before, after string) string {
+	t.Helper()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "pve.sources")
+	if before != "" {
+		if err := os.WriteFile(target, []byte(before), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reg := provider.NewRegistry(stub{id: "p", configured: true, changes: plan.Changes{
+		Steps: []plan.Step{{ID: "w", Provider: "p", Action: plan.ActionWrite,
+			Path: target, Content: []byte(after)}},
+	}})
+	p, _ := New(reg, nil, "тест").Collect(context.Background(), &manifest.Manifest{}, &facts.Facts{})
+	if len(p.Steps) != 1 {
+		t.Fatalf("шаг записи потерян: %+v", p.Steps)
+	}
+	return p.Steps[0].Diff
+}
+
+func TestDiffShowsChangedLine(t *testing.T) {
+	got := diffFor(t,
+		"Types: deb\nURIs: https://enterprise.proxmox.com/debian/pve\nSuites: trixie\n",
+		"Types: deb\nURIs: http://download.proxmox.com/debian/pve\nSuites: trixie\n")
+
+	for _, want := range []string{
+		"-URIs: https://enterprise.proxmox.com/debian/pve",
+		"+URIs: http://download.proxmox.com/debian/pve",
+		" Types: deb",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("в разнице нет %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestDiffOfIdenticalContentIsEmpty(t *testing.T) {
+	same := "Types: deb\nSuites: trixie\n"
+	if got := diffFor(t, same, same); got != "" {
+		t.Errorf("совпадающее содержимое дало разницу:\n%s", got)
+	}
+}
+
+func TestDiffOfNewFileIsAllAdditions(t *testing.T) {
+	got := diffFor(t, "", "первая\nвторая\n")
+	if strings.Contains(got, "\n-") {
+		t.Errorf("у нового файла появились удаления:\n%s", got)
+	}
+	if !strings.Contains(got, "+первая") {
+		t.Errorf("новые строки потеряны:\n%s", got)
+	}
+}
+
+// Показывать надо изменение, а не весь файл: конфиг на триста строк
+// целиком на экран не влезет, и человек перестанет их читать.
+func TestDiffOfLongFileShowsOnlyContext(t *testing.T) {
+	var before, after []string
+	for i := 0; i < 200; i++ {
+		before = append(before, "строка")
+		after = append(after, "строка")
+	}
+	after[100] = "изменённая строка"
+
+	got := diffFor(t, strings.Join(before, "\n")+"\n", strings.Join(after, "\n")+"\n")
+	if lines := strings.Count(got, "\n"); lines > 15 {
+		t.Errorf("на экран выведено %d строк вместо небольшого куска:\n%s", lines, got)
+	}
+	if !strings.Contains(got, "+изменённая строка") {
+		t.Errorf("само изменение не показано:\n%s", got)
+	}
+}
+
+// Большой файл не должен стоить сотен мегабайт. Своя реализация строила
+// таблицу на n·m и съедала 200 МБ на пяти тысячах строк — этот тест стоит
+// здесь, чтобы такое не вернулось незаметно.
+func TestDiffOfBigFileIsCheap(t *testing.T) {
+	var before, after []string
+	for i := 0; i < 5000; i++ {
+		before = append(before, "строка конфигурации")
+		after = append(after, "строка конфигурации")
+	}
+	after[2500] = "изменённая"
+
+	var start, end runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&start)
+	got := diffFor(t, strings.Join(before, "\n")+"\n", strings.Join(after, "\n")+"\n")
+	runtime.ReadMemStats(&end)
+
+	if !strings.Contains(got, "+изменённая") {
+		t.Fatalf("изменение не найдено:\n%s", got)
+	}
+	const limit = 64 << 20
+	if used := end.TotalAlloc - start.TotalAlloc; used > limit {
+		t.Errorf("на файл в 5000 строк ушло %d МБ, порог %d МБ", used>>20, limit>>20)
 	}
 }

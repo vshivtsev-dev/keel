@@ -10,7 +10,7 @@
 #             TLS, домен и маршрутизацию делает Traefik, который в Dokploy
 #             уже есть, поэтому свой обратный прокси здесь не поднимается.
 
-FROM golang:1.24-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 ARG VERSION=dev
 # KEEL_DIST_URL вкомпилируется в бинарник: по нему keel update будет

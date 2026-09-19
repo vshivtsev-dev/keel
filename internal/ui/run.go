@@ -6,6 +6,7 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"golang.org/x/term"
 
 	"github.com/vshivtsev-dev/keel/internal/cli"
 )
@@ -16,7 +17,7 @@ import (
 // в systemd-юните нужен обычный текст. Поэтому здесь честный отказ с
 // подсказкой, чем его заменить.
 func Run(ctx context.Context, app *cli.App) error {
-	if !isTerminal(os.Stdout) {
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
 		return fmt.Errorf("экран keel требует терминала.\n" +
 			"Без него те же действия делают команды: keel plan, keel apply, keel verify")
 	}
@@ -30,15 +31,4 @@ func Run(ctx context.Context, app *cli.App) error {
 
 	_, err := p.Run()
 	return err
-}
-
-// isTerminal — проверка без зависимостей: символьное устройство и есть
-// терминал. Тащить ради одной строки библиотеку, которая поднимет
-// требование к версии Go, в инструменте восстановления не стоит.
-func isTerminal(f *os.File) bool {
-	st, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return st.Mode()&os.ModeCharDevice != 0
 }
