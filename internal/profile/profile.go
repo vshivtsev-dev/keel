@@ -152,8 +152,12 @@ func Load(name string) (*Profile, error) {
 	}
 	// Профили — такой же JSON с комментариями, как манифест: их читают и
 	// правят люди, и комментарий в них полезнее, чем отдельный документ.
+	std, err := manifest.Standardize(raw)
+	if err != nil {
+		return nil, fmt.Errorf("профиль %s: %w", name, err)
+	}
 	var p Profile
-	if err := json.Unmarshal(manifest.Relax(raw), &p); err != nil {
+	if err := json.Unmarshal(std, &p); err != nil {
 		return nil, fmt.Errorf("профиль %s: %w", name, err)
 	}
 	p.Name = name

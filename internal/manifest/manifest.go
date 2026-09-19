@@ -156,7 +156,11 @@ func Load(path string) (*Manifest, error) {
 // Parse разбирает содержимое манифеста.
 func Parse(raw []byte) (*Manifest, error) {
 	var m Manifest
-	dec := json.NewDecoder(bytes.NewReader(Relax(raw)))
+	std, err := Standardize(raw)
+	if err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(std))
 	// Неизвестный ключ — это почти всегда опечатка, и промолчать о ней
 	// хуже, чем отказаться: молча проигнорированный ключ выглядит как
 	// «keel меня не послушался».
